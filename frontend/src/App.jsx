@@ -2,13 +2,74 @@ import { useEffect, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 
 // ── Mock data ─────────────────────────────────────────────
+function daysAgo(days) {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+const IST_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Kolkata',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+const IST_DATE_TIME_FORMATTER = new Intl.DateTimeFormat('en-IN', {
+  timeZone: 'Asia/Kolkata',
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+  hour12: true,
+});
+
+function getISTDateKey(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+
+  const parts = IST_DATE_FORMATTER.formatToParts(date);
+  const year = parts.find(part => part.type === 'year')?.value;
+  const month = parts.find(part => part.type === 'month')?.value;
+  const day = parts.find(part => part.type === 'day')?.value;
+
+  return year && month && day ? `${year}-${month}-${day}` : '';
+}
+
+function formatISTDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+
+  return `${IST_DATE_TIME_FORMATTER.format(date)} IST`;
+}
+
 const MOCK_REQUESTS = [
-  { id: 1, patient: 'Ravi Shankar', hospital: 'AIIMS Delhi', blood: 'B+', contact: '9876543210', status: 'pending', time: '2 min ago', donors: 6 },
-  { id: 2, patient: 'Priya Mehta', hospital: 'Apollo, Mumbai', blood: 'O-', contact: '9123456789', status: 'active', time: '18 min ago', donors: 3 },
-  { id: 3, patient: 'Arjun Das', hospital: 'Manipal Hospital', blood: 'A+', contact: '9988776655', status: 'fulfilled', time: '1 hr ago', donors: 8 },
-  { id: 4, patient: 'Sunita Rao', hospital: 'KGH Vizag', blood: 'AB+', contact: '9765432100', status: 'pending', time: '3 hr ago', donors: 2 },
-  { id: 5, patient: 'Mohit Gupta', hospital: 'PGIMER', blood: 'B-', contact: '9654321098', status: 'active', time: '5 hr ago', donors: 5 },
+  { id: 1, patient: 'Ravi Shankar', hospital: 'AIIMS Delhi', blood: 'B+', contact: '9876543210', status: 'pending', time: '2 min ago', donors: 6, createdAt: daysAgo(0) },
+  { id: 2, patient: 'Priya Mehta', hospital: 'Apollo, Mumbai', blood: 'O-', contact: '9123456789', status: 'active', time: '18 min ago', donors: 3, createdAt: daysAgo(0) },
+  { id: 3, patient: 'Arjun Das', hospital: 'Manipal Hospital', blood: 'A+', contact: '9988776655', status: 'fulfilled', time: '1 hr ago', donors: 8, createdAt: daysAgo(1) },
+  { id: 4, patient: 'Sunita Rao', hospital: 'KGH Vizag', blood: 'AB+', contact: '9765432100', status: 'pending', time: '3 hr ago', donors: 2, createdAt: daysAgo(35) },
+  { id: 5, patient: 'Mohit Gupta', hospital: 'PGIMER', blood: 'B-', contact: '9654321098', status: 'active', time: '5 hr ago', donors: 5, createdAt: daysAgo(0) },
 ];
+
+function getRequestPeriod(createdAt) {
+  const createdKey = getISTDateKey(createdAt);
+  if (!createdKey) return 'older';
+
+  const now = new Date();
+  const todayKey = getISTDateKey(now);
+  if (!todayKey) return 'older';
+
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayKey = getISTDateKey(yesterday);
+
+  const createdMonthKey = createdKey.slice(0, 7);
+  const currentMonthKey = todayKey.slice(0, 7);
+
+  if (createdKey === todayKey) return 'today';
+  if (createdKey === yesterdayKey) return 'yesterday';
+  if (createdMonthKey === currentMonthKey) return 'this-month';
+  return 'older';
+}
 
 const MOCK_DONORS = [
   { id: 1, name: 'Ankit Sharma', admission: 'ISM/2022/001', gender: 'Male', programme: 'B.Tech', blood: 'B+', mobile: '9810101010', lastDon: null, eligible: true, notified: false },
@@ -201,19 +262,25 @@ const ACTIVITY = [
 const NAV = [
   { key: 'dashboard', label: 'Dashboard', icon: '⚡', badge: null },
   { key: 'request', label: 'New Request', icon: '➕', badge: null },
+  { key: 'recent', label: 'Recent Requests', icon: '📋', badge: null },
   { key: 'donors', label: 'Donors', icon: '👥', badge: '56' },
   { key: 'logs', label: 'Notifications', icon: '📲', badge: '3' },
 ];
 
 // ── Sub-components ─────────────────────────────────────────
 
-function StatCard({ value, label, icon, color, delta, deltaType }) {
+function StatCard({ value, label, icon, color, delta, deltaType, onSeeMore }) {
   return (
     <div className={`stat-card ${color} animate-in`}>
       <div className="stat-icon">{icon}</div>
       <div className="stat-value">{value}</div>
       <div className="stat-label">{label}</div>
       {delta && <div className={`stat-delta ${deltaType}`}>{delta}</div>}
+      {onSeeMore && (
+        <button type="button" className="stat-action red" onClick={onSeeMore} aria-label={`See more ${label}`}>
+          See more ▶
+        </button>
+      )}
     </div>
   );
 }
@@ -227,11 +294,75 @@ function StatusPill({ status }) {
   return <span className={`status-pill ${status}`}>{map[status] || status}</span>;
 }
 
+// Small request item component with expandable details showing who was notified
+function RequestItem({ request }) {
+  const [open, setOpen] = useState(false);
+
+  // find matching notification logs for this request (match by patient name)
+  const matches = BLOOD_NOTIFICATION_LOGS.filter(l => String(l.request || '').toLowerCase().includes(String(request.patient || '').toLowerCase()));
+
+  return (
+    <div style={{ width: '100%' }}>
+      <div className="request-row">
+        <BloodBadge type={request.blood} />
+        <div className="request-info">
+          <strong>{request.patient}</strong>
+          <span>{request.hospital} · {formatISTDateTime(request.createdAt) || request.time}</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-3)' }}>{request.donors} matched</span>
+          <StatusPill status={request.status} />
+          <button type="button" className="action-btn" onClick={() => setOpen(s => !s)} aria-expanded={open} style={{ marginLeft: '0.5rem' }}>
+            {open ? 'Hide' : 'Details'}
+          </button>
+        </div>
+      </div>
+
+      {open && (
+        <div className="card" style={{ margin: '0.5rem 0', padding: '0.75rem', background: 'var(--bg-1)' }}>
+          <div style={{ fontSize: '0.95rem', marginBottom: '0.5rem' }}>
+            <strong>Request details</strong>
+          </div>
+          <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
+            <div><strong>Contact:</strong> {request.contact || '—'}</div>
+            <div><strong>Blood:</strong> {request.blood}</div>
+            <div><strong>Units:</strong> {request.donors}</div>
+            <div><strong>Submitted:</strong> {formatISTDateTime(request.createdAt) || request.time}</div>
+          </div>
+
+          <div>
+            <strong>Notifications sent</strong>
+            {matches.length === 0 ? (
+              <div style={{ color: 'var(--text-3)', marginTop: '0.5rem' }}>No notification records found for this request.</div>
+            ) : (
+              <div style={{ marginTop: '0.5rem' }}>
+                {matches.map(m => (
+                  <div key={m.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem 0', borderBottom: '1px dashed var(--muted)' }}>
+                    <div>
+                      <div style={{ fontWeight: 700 }}>{m.donor}</div>
+                      <div style={{ fontSize: '0.85rem', color: 'var(--text-3)' }}>{m.msg}</div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: '0.85rem' }}>{m.status}</div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-3)' }}>{m.time}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Dashboard View ─────────────────────────────────────────
-function DashboardView({ donors, onSeeAllNotifications }) {
+function DashboardView({ donors, requests, onSeeAllNotifications }) {
   const eligibleCount = donors.filter(donor => donor.eligible).length;
   const bloodCounts = getBloodCounts(donors);
   const recentBloodNotifications = BLOOD_NOTIFICATION_LOGS.slice(0, 5);
+  const recentRequests = requests.slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 5);
 
   return (
     <div className="section-gap">
@@ -256,18 +387,8 @@ function DashboardView({ donors, onSeeAllNotifications }) {
               </div>
             </div>
             <div className="request-list">
-              {MOCK_REQUESTS.map(r => (
-                <div key={r.id} className="request-row">
-                  <BloodBadge type={r.blood} />
-                  <div className="request-info">
-                    <strong>{r.patient}</strong>
-                    <span>{r.hospital} · {r.time}</span>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                    <span style={{ fontSize: '0.75rem', color: 'var(--text-3)' }}>{r.donors} matched</span>
-                    <StatusPill status={r.status} />
-                  </div>
-                </div>
+              {recentRequests.map(r => (
+                <RequestItem key={r.id} request={r} />
               ))}
             </div>
           </div>
@@ -315,105 +436,180 @@ function DashboardView({ donors, onSeeAllNotifications }) {
 }
 
 // ── Request Form View ──────────────────────────────────────
-function RequestView() {
-  const [form, setForm] = useState({ patientName: '', hospitalName: '', bloodGroup: 'A+', contactNo: '', urgency: 'normal', notes: '' });
+function RequestView({ donors = [], onCreateRequest }) {
+  const emptyForm = { patientName: '', hospitalName: '', bloodGroup: 'A+', contactNo: '', unitsNeeded: '', urgency: 'normal', notes: '' };
+  const [form, setForm] = useState(emptyForm);
   const [submitted, setSubmitted] = useState(false);
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
-
+  const bloodCounts = getBloodCounts(donors);
   const handleChange = e => setForm(f => ({ ...f, [e.target.name]: e.target.value }));
-
   const handleFile = e => {
     const f = e.target.files[0];
     if (f) setFile(f);
   };
-
   const handleSubmit = async e => {
     e.preventDefault();
     setLoading(true);
     await new Promise(r => setTimeout(r, 1200));
     setLoading(false);
+    onCreateRequest?.({
+      id: Date.now(),
+      patient: form.patientName,
+      hospital: form.hospitalName,
+      blood: form.bloodGroup,
+      contact: form.contactNo,
+      status: 'pending',
+      time: 'just now',
+      donors: Number(form.unitsNeeded) || 0,
+      createdAt: new Date().toISOString(),
+    });
     setSubmitted(true);
-    setForm({ patientName: '', hospitalName: '', bloodGroup: 'A+', contactNo: '', urgency: 'normal', notes: '' });
+    setForm(emptyForm);
     setFile(null);
     setTimeout(() => setSubmitted(false), 5000);
   };
 
   return (
     <div className="form-page animate-in">
-      <h2>New Donation Request</h2>
-      <p className="page-sub">Upload a medical requisition form or fill in the details manually. Matched donors will be notified via WhatsApp automatically.</p>
+      <div className="request-layout">
+        <div className="form-card card form-card-full">
+          {/* Upload zone */}
+          <label
+            className={`upload-zone ${file ? 'has-file' : ''}`}
+            htmlFor="form-upload"
+            onDragOver={e => e.preventDefault()}
+            onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) setFile(f); }}
+          >
+            <div className="upload-icon">{file ? '✅' : '📄'}</div>
+            {file
+              ? <p><strong>{file.name}</strong><br />Ready for AI extraction</p>
+              : <p><strong>Drop requisition form here</strong><br />or click to upload · PDF, JPG, PNG</p>
+            }
+            <input id="form-upload" type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={handleFile} />
+          </label>
 
-      <div className="form-card card">
-        {/* Upload zone */}
-        <label
-          className={`upload-zone ${file ? 'has-file' : ''}`}
-          htmlFor="form-upload"
-          onDragOver={e => e.preventDefault()}
-          onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) setFile(f); }}
-        >
-          <div className="upload-icon">{file ? '✅' : '📄'}</div>
-          {file
-            ? <p><strong>{file.name}</strong><br />Ready for AI extraction</p>
-            : <p><strong>Drop requisition form here</strong><br />or click to upload · PDF, JPG, PNG</p>
-          }
-          <input id="form-upload" type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={handleFile} />
-        </label>
-
-        <form className="form-grid" onSubmit={handleSubmit}>
-          <div className="form-row">
-            <div className="field">
-              <label htmlFor="patientName">Patient Name *</label>
-              <input id="patientName" name="patientName" required value={form.patientName} onChange={handleChange} placeholder="Full patient name" />
+          <form className="form-grid" onSubmit={handleSubmit}>
+            <div className="form-row">
+              <div className="field">
+                <label htmlFor="patientName">Patient Name *</label>
+                <input id="patientName" name="patientName" required value={form.patientName} onChange={handleChange} placeholder="Full patient name" />
+              </div>
+              <div className="field">
+                <label htmlFor="hospitalName">Hospital / Clinic *</label>
+                <input id="hospitalName" name="hospitalName" required value={form.hospitalName} onChange={handleChange} placeholder="Hospital name" />
+              </div>
             </div>
+
+            <div className="form-row">
+              <div className="field">
+                <label htmlFor="bloodGroup">Required Blood Group *</label>
+                <select id="bloodGroup" name="bloodGroup" value={form.bloodGroup} onChange={handleChange}>
+                  {BLOOD_GROUPS.map(g => <option key={g} value={g}>{g}</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label htmlFor="contactNo">Contact Number *</label>
+                <input id="contactNo" name="contactNo" required value={form.contactNo} onChange={handleChange} placeholder="+91 XXXXXXXXXX" />
+              </div>
+            </div>
+
+            <div className="form-row">
+              <div className="field">
+                <label htmlFor="unitsNeeded">Number of Units Needed *</label>
+                <input id="unitsNeeded" name="unitsNeeded" type="number" min="1" step="1" required value={form.unitsNeeded} onChange={handleChange} placeholder="e.g. 2" />
+              </div>
+              <div className="field">
+                <label htmlFor="urgency">Urgency Level</label>
+                <select id="urgency" name="urgency" value={form.urgency} onChange={handleChange}>
+                  <option value="normal">Normal</option>
+                  <option value="urgent">Urgent</option>
+                  <option value="critical">Critical — Immediate</option>
+                </select>
+              </div>
+            </div>
+
             <div className="field">
-              <label htmlFor="hospitalName">Hospital / Clinic *</label>
-              <input id="hospitalName" name="hospitalName" required value={form.hospitalName} onChange={handleChange} placeholder="Hospital name" />
+              <label htmlFor="notes">Additional Notes</label>
+              <textarea id="notes" name="notes" value={form.notes} onChange={handleChange} placeholder="Optional: ward details, timing, doctor notes, or other context…" />
+            </div>
+
+            <div className="form-actions">
+              <button type="submit" className="btn btn-primary" disabled={loading}>
+                {loading ? '⏳ Submitting…' : '🩸 Submit & Notify Donors'}
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={() => setForm(emptyForm)}>
+                Clear
+              </button>
+            </div>
+
+            {submitted && (
+              <div className="success-banner">
+                ✅ Request saved! Matched donors are being notified via WhatsApp.
+              </div>
+            )}
+          </form>
+        </div>
+
+        <aside className="card donor-pool-panel">
+          <div className="card-header donor-pool-header">
+            <div>
+              <h3>Donor Pool by Blood Group</h3>
+              <p>Eligible donors currently in system</p>
             </div>
           </div>
 
-          <div className="form-row">
-            <div className="field">
-              <label htmlFor="bloodGroup">Required Blood Group *</label>
-              <select id="bloodGroup" name="bloodGroup" value={form.bloodGroup} onChange={handleChange}>
-                {BLOOD_GROUPS.map(g => <option key={g} value={g}>{g}</option>)}
-              </select>
-            </div>
-            <div className="field">
-              <label htmlFor="contactNo">Contact Number *</label>
-              <input id="contactNo" name="contactNo" required value={form.contactNo} onChange={handleChange} placeholder="+91 XXXXXXXXXX" />
-            </div>
+          <div className="donor-pool-list">
+            {BLOOD_GROUPS.map(group => (
+              <div key={group} className="donor-pool-item">
+                <div className="donor-pool-group">{group}</div>
+                <div className="donor-pool-count">{bloodCounts[group]} donors</div>
+              </div>
+            ))}
           </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
 
-          <div className="field">
-            <label htmlFor="urgency">Urgency Level</label>
-            <select id="urgency" name="urgency" value={form.urgency} onChange={handleChange}>
-              <option value="normal">Normal</option>
-              <option value="urgent">Urgent</option>
-              <option value="critical">Critical — Immediate</option>
+// ── Recent Requests View ──────────────────────────────────
+function RecentRequestsView({ requests }) {
+  const [periodFilter, setPeriodFilter] = useState('all');
+  const filteredRequests = requests.filter(request => {
+    if (periodFilter === 'all') return true;
+    const p = getRequestPeriod(request.createdAt);
+    if (periodFilter === 'this-month') return p === 'this-month' || p === 'today' || p === 'yesterday';
+    return p === periodFilter;
+  });
+
+  // sort newest -> oldest by createdAt
+  const sortedRequests = filteredRequests.slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  return (
+    <div className="section-gap animate-in">
+      <div className="card recent-requests-card">
+        <div className="card-header">
+          <div>
+            <h3>Recent Requests</h3>
+            <p>Latest blood donation requisitions and current status</p>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+            <select className="filter-select" value={periodFilter} onChange={e => setPeriodFilter(e.target.value)} aria-label="Filter recent requests by period">
+              <option value="all">All</option>
+              <option value="today">Today</option>
+              <option value="yesterday">Yesterday</option>
+              <option value="this-month">This Month</option>
             </select>
+            <span className="status-pill active">Live</span>
           </div>
+        </div>
 
-          <div className="field">
-            <label htmlFor="notes">Additional Notes</label>
-            <textarea id="notes" name="notes" value={form.notes} onChange={handleChange} placeholder="Specify units needed, ward details, or other context…" />
-          </div>
-
-          <div className="form-actions">
-            <button type="submit" className="btn btn-primary" disabled={loading}>
-              {loading ? '⏳ Submitting…' : '🩸 Submit & Notify Donors'}
-            </button>
-            <button type="button" className="btn btn-secondary" onClick={() => setForm({ patientName: '', hospitalName: '', bloodGroup: 'A+', contactNo: '', urgency: 'normal', notes: '' })}>
-              Clear
-            </button>
-          </div>
-
-          {submitted && (
-            <div className="success-banner">
-              ✅ Request saved! Matched donors are being notified via WhatsApp.
-            </div>
-          )}
-        </form>
+        <div className="request-list">
+          {sortedRequests.map(request => (
+            <RequestItem key={request.id} request={request} />
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -428,77 +624,65 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta }) {
   const [showSheetPreview, setShowSheetPreview] = useState(false);
   const fileInputRef = useRef(null);
 
-  const notify = id => setDonors(d => d.map(x => x.id === id ? { ...x, notified: true } : x));
-
   const triggerImport = () => fileInputRef.current?.click();
+
+  const handleViewSheet = () => setShowSheetPreview(true);
 
   const handleImport = async event => {
     const file = event.target.files?.[0];
-    event.target.value = '';
-
     if (!file) return;
 
     try {
-      setFileMessage({ type: 'info', text: `Reading ${file.name}...` });
       const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
       const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+      const parsedDonors = parseDonorsSheet(worksheet);
 
-      if (!worksheet) {
-        throw new Error('The workbook does not contain a readable sheet.');
+      if (!parsedDonors.length) {
+        setFileMessage({ type: 'error', text: 'No donor rows found in the selected file.' });
+        return;
       }
 
-      const importedDonors = parseDonorsSheet(worksheet);
-
-      if (!importedDonors.length) {
-        throw new Error('No donor rows were found. Make sure the sheet includes the expected headers.');
-      }
-
-      const persistedSheet = await savePersistedSheet(importedDonors, {
+      const nextSheetMeta = {
         name: file.name,
-        rows: importedDonors.length,
+        rows: parsedDonors.length,
         importedAt: new Date().toISOString(),
-      });
+      };
 
-      setDonors(persistedSheet.donors || importedDonors);
-      setSheetMeta(persistedSheet.sheetMeta || { name: file.name, rows: importedDonors.length, importedAt: new Date().toLocaleString() });
-      setSearch('');
+      await savePersistedSheet(parsedDonors, nextSheetMeta);
+      setDonors(parsedDonors);
+      setSheetMeta(nextSheetMeta);
       setFilterBG('all');
       setFilterStatus('all');
-      setFileMessage({ type: 'success', text: `Imported ${importedDonors.length} donors from ${file.name}.` });
-      await sendBrowserNotification('Excel sheet imported', `${file.name} is now the active donor sheet with ${importedDonors.length} rows.`);
+      setShowSheetPreview(false);
+      setFileMessage({ type: 'success', text: `Imported ${parsedDonors.length} donors from ${file.name}.` });
+      await sendBrowserNotification('Excel sheet imported', `${file.name} is now the active donor source.`);
     } catch (error) {
-      setFileMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to read the Excel file.' });
+      console.error(error);
+      setFileMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to import donor sheet.' });
+    } finally {
+      event.target.value = '';
     }
-  };
-
-  const handleViewSheet = () => {
-    if (!sheetMeta) {
-      setFileMessage({ type: 'error', text: 'Import a sheet first to view its contents.' });
-      return;
-    }
-
-    setShowSheetPreview(true);
   };
 
   const handleDeleteSheet = async () => {
-    if (!sheetMeta) {
-      setFileMessage({ type: 'error', text: 'No active sheet to delete.' });
-      return;
-    }
-
-    const confirmed = window.confirm(`Delete the active sheet "${sheetMeta.name}" and clear the donor source data?`);
-    if (!confirmed) return;
+    if (!sheetMeta) return;
 
     const deletedName = sheetMeta.name;
-    await deletePersistedSheet();
-    setDonors([]);
-    setSheetMeta(null);
-    setSearch('');
-    setFilterBG('all');
-    setFilterStatus('all');
-    setShowSheetPreview(false);
-    setFileMessage({ type: 'success', text: `Deleted active sheet ${deletedName}.` });
-    await sendBrowserNotification('Excel sheet deleted', `${deletedName} was removed from the active data source.`);
+
+    try {
+      await deletePersistedSheet();
+      setDonors(MOCK_DONORS);
+      setSheetMeta(null);
+      setSearch('');
+      setFilterBG('all');
+      setFilterStatus('all');
+      setShowSheetPreview(false);
+      setFileMessage({ type: 'success', text: `Removed active sheet ${deletedName}.` });
+      await sendBrowserNotification('Excel sheet removed', `${deletedName} was removed from the active data source.`);
+    } catch (error) {
+      console.error(error);
+      setFileMessage({ type: 'error', text: 'Failed to remove the active sheet.' });
+    }
   };
 
   const handleDownloadSheet = () => {
@@ -557,8 +741,17 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta }) {
         <button type="button" className="btn btn-secondary import-btn" onClick={handleViewSheet} disabled={!sheetMeta}>
           👁 View Sheet
         </button>
-        <button type="button" className="btn btn-secondary import-btn danger" onClick={handleDeleteSheet} disabled={!sheetMeta}>
-          🗑 Delete Sheet
+        <button
+          type="button"
+          className="btn btn-secondary import-btn danger"
+          onClick={() => {
+            if (!sheetMeta) return;
+            const ok = window.confirm(`Remove active sheet '${sheetMeta.name}'? This will clear the saved donor list.`);
+            if (ok) handleDeleteSheet();
+          }}
+          disabled={!sheetMeta}
+        >
+          🗑 Remove Sheet
         </button>
         <input ref={fileInputRef} type="file" accept=".xls,.xlsx" onChange={handleImport} className="sr-only-file" />
         <select className="filter-select" value={filterBG} onChange={e => setFilterBG(e.target.value)}>
@@ -688,6 +881,7 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta }) {
 function LogsView() {
   const iconMap = { sent: '📤', accepted: '✅', declined: '❌', pending: '⏳' };
   const [logType, setLogType] = useState('blood');
+  const [detailsList, setDetailsList] = useState(null);
 
   const activeLogs = logType === 'blood' ? BLOOD_NOTIFICATION_LOGS : ADMIN_NOTIFICATION_LOGS;
 
@@ -713,11 +907,47 @@ function LogsView() {
         </button>
       </div>
 
-      <div className="stats-row" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: '1.25rem' }}>
-        <StatCard value="18" label="Sent" icon="📤" color="blue" />
-        <StatCard value="9" label="Accepted" icon="✅" color="green" />
-        <StatCard value="4" label="Declined" icon="❌" color="red" />
-        <StatCard value="5" label="Awaiting" icon="⏳" color="amber" />
+      <div style={{ marginBottom: '0.75rem' }}>
+        <div className="stats-row" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
+          <StatCard value="18" label="Sent" icon="📤" color="blue" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='sent'))} />
+          <StatCard value="9" label="Accepted" icon="✅" color="green" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='accepted'))} />
+          <StatCard value="4" label="Declined" icon="❌" color="red" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='declined'))} />
+          <StatCard value="5" label="Awaiting" icon="⏳" color="amber" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='pending'))} />
+        </div>
+        {detailsList && (
+          <div className="sheet-modal-backdrop" onClick={() => setDetailsList(null)}>
+            <div className="sheet-modal card" onClick={e => e.stopPropagation()}>
+              <div className="card-header">
+                <div>
+                  <h3>Notification Details</h3>
+                  <p>{detailsList.length} record(s)</p>
+                </div>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button className="action-btn notify" onClick={() => setDetailsList(null)}>Close</button>
+                </div>
+              </div>
+              <div style={{ marginTop: '0.5rem' }}>
+                {detailsList.length === 0 ? (
+                  <div style={{ color: 'var(--text-3)' }}>No records</div>
+                ) : (
+                  detailsList.map(d => (
+                    <div key={d.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.6rem 0', borderBottom: '1px dashed var(--border)' }}>
+                      <div>
+                        <div style={{ fontWeight: 700 }}>{d.donor}</div>
+                        <div style={{ fontSize: '0.9rem', color: 'var(--text-3)' }}>{d.msg}</div>
+                        <div style={{ fontSize: '0.85rem', color: 'var(--text-3)' }}>{d.request}</div>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>{d.status}</div>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--text-3)' }}>{d.time}</div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="card">
@@ -745,6 +975,7 @@ function LogsView() {
 export default function App() {
   const [view, setView] = useState('dashboard');
   const [donors, setDonors] = useState(MOCK_DONORS);
+  const [requests, setRequests] = useState(MOCK_REQUESTS);
   const [sheetMeta, setSheetMeta] = useState(null);
 
   useEffect(() => {
@@ -752,14 +983,21 @@ export default function App() {
 
     const loadSheet = async () => {
       try {
-        const persistedSheet = await readPersistedSheet();
+        const store = await readPersistedSheet();
         if (!active) return;
 
-        setDonors(Array.isArray(persistedSheet.donors) ? persistedSheet.donors : []);
-        setSheetMeta(persistedSheet.sheetMeta || null);
+        if (store && Array.isArray(store.donors) && store.donors.length > 0) {
+          setDonors(store.donors);
+          setSheetMeta(store.sheetMeta || null);
+        } else {
+          setDonors(MOCK_DONORS);
+          setSheetMeta(null);
+        }
       } catch (error) {
         if (active) {
           console.warn('Falling back to local donor defaults:', error);
+          setDonors(MOCK_DONORS);
+          setSheetMeta(null);
         }
       }
     };
@@ -774,12 +1012,17 @@ export default function App() {
   const PAGE_TITLES = {
     dashboard: { title: 'Operator Dashboard', sub: 'Real-time overview of all donation activity' },
     request:   { title: 'New Donation Request', sub: 'Submit or upload a blood requisition form' },
+    recent:    { title: 'Recent Requests', sub: 'Browse the latest request statuses and matches' },
     donors:    { title: 'Donor Management', sub: 'Browse and notify eligible student donors' },
     logs:      { title: 'Notification Logs', sub: 'WhatsApp outreach status and donor replies' },
   };
 
   const { title, sub } = PAGE_TITLES[view];
   const navItems = NAV.map(item => item.key === 'donors' ? { ...item, badge: String(donors.length) } : item);
+
+  const handleCreateRequest = request => {
+    setRequests(currentRequests => [request, ...currentRequests]);
+  };
 
   return (
     <div className="app">
@@ -834,14 +1077,15 @@ export default function App() {
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.78rem', color: 'var(--text-3)' }}>
               <div className="status-dot" /> Live
             </div>
-            <button className="topbar-btn" onClick={() => setView('donors')}>👥 Donors</button>
             <button className="topbar-btn primary" onClick={() => setView('request')}>➕ New Request</button>
+            <button className="topbar-btn" onClick={() => setView('donors')}>👥 Donors</button>
           </div>
         </header>
 
-        <div className="content-area">
-          {view === 'dashboard' && <DashboardView donors={donors} onSeeAllNotifications={() => setView('logs')} />}
-          {view === 'request'   && <RequestView />}
+        <div className={`content-area ${view === 'request' ? 'request-mode' : ''}`}>
+          {view === 'dashboard' && <DashboardView donors={donors} requests={requests} onSeeAllNotifications={() => setView('logs')} />}
+          {view === 'request'   && <RequestView donors={donors} onCreateRequest={handleCreateRequest} />}
+          {view === 'recent'    && <RecentRequestsView requests={requests} />}
           {view === 'donors' && <DonorsView donors={donors} setDonors={setDonors} sheetMeta={sheetMeta} setSheetMeta={setSheetMeta} />}
           {view === 'logs'      && <LogsView />}
         </div>
