@@ -1,9 +1,9 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap');
 
 :root {
-  --bg: #fdf4f5;
+  --bg: #f6f7f9;
   --bg-2: #ffffff;
-  --bg-3: #fef0f1;
+  --bg-3: #f8f9fc;
   --bg-4: #fce4e7;
   --border: rgba(200,30,50,0.12);
   --border-hover: rgba(200,30,50,0.25);
@@ -22,7 +22,7 @@
   --blue-soft: rgba(37,99,235,0.10);
   --purple: #7c3aed;
   --purple-soft: rgba(124,58,237,0.10);
-  --shadow-card: 0 2px 16px rgba(200,25,45,0.08);
+  --shadow-card: 0 6px 22px rgba(15,20,30,0.06);
   --shadow-glow: 0 0 40px rgba(200,25,45,0.10);
   --radius-sm: 10px;
   --radius-md: 16px;
@@ -217,6 +217,17 @@ html, body, #root {
 }
 .topbar-btn.primary:hover { transform: translateY(-1px); box-shadow: 0 8px 20px var(--red-glow); }
 
+.see-all-btn {
+  background: rgba(200,25,45,0.08);
+  border: 1px solid rgba(200,25,45,0.14);
+  color: var(--red);
+}
+.see-all-btn:hover {
+  background: var(--red);
+  color: #fff;
+  border-color: var(--red);
+}
+
 .status-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
@@ -258,39 +269,40 @@ html, body, #root {
 }
 .card-header h3 {
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 1rem;
+  font-size: 1.05rem;
   font-weight: 600;
 }
 .card-header p { font-size: 0.8rem; color: var(--text-3); margin-top: 3px; }
 
-/* ── Dashboard ────────────────────────────────────── */
 .stats-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 1rem;
-  margin-bottom: 1.25rem;
+  gap: 1.25rem;
+  margin-bottom: 1rem;
+  align-items: stretch;
 }
 
 .stat-card {
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 1.1rem 1.25rem;
+  padding: 1.25rem 1.35rem;
   cursor: default;
-  transition: border-color var(--transition), transform var(--transition);
+  transition: border-color var(--transition), transform var(--transition), box-shadow var(--transition);
   position: relative;
   overflow: hidden;
+  box-shadow: 0 6px 18px rgba(10,12,14,0.03);
 }
 .stat-card::before {
   content: '';
   position: absolute;
   top: 0; left: 0; right: 0;
-  height: 2px;
+  height: 3px;
   background: var(--accent-color, var(--red));
   opacity: 0;
   transition: opacity var(--transition);
 }
-.stat-card:hover { border-color: var(--border-hover); transform: translateY(-2px); }
+.stat-card:hover { border-color: var(--border-hover); transform: translateY(-3px); box-shadow: 0 10px 28px rgba(10,12,14,0.06); }
 .stat-card:hover::before { opacity: 1; }
 
 .stat-card.red { --accent-color: var(--red); }
@@ -299,10 +311,10 @@ html, body, #root {
 .stat-card.blue { --accent-color: var(--blue); }
 
 .stat-icon {
-  width: 36px; height: 36px;
-  border-radius: var(--radius-sm);
+  width: 44px; height: 44px;
+  border-radius: calc(var(--radius-sm) - 2px);
   display: flex; align-items: center; justify-content: center;
-  font-size: 1rem; margin-bottom: 0.85rem;
+  font-size: 1.1rem; margin-bottom: 0.85rem;
 }
 .stat-card.red .stat-icon { background: var(--red-soft); }
 .stat-card.green .stat-icon { background: var(--green-soft); }
@@ -311,8 +323,8 @@ html, body, #root {
 
 .stat-value {
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 2rem; font-weight: 700;
-  line-height: 1;
+  font-size: 1.6rem; font-weight: 700;
+  line-height: 1.05;
 }
 .stat-label { font-size: 0.78rem; color: var(--text-3); margin-top: 0.4rem; font-weight: 500; }
 .stat-delta {
@@ -386,13 +398,13 @@ html, body, #root {
   display: flex;
   align-items: center;
   gap: 1rem;
-  padding: 0.9rem 1.25rem;
+  padding: 1rem 1.25rem;
   border-bottom: 1px solid var(--border);
-  transition: background var(--transition);
+  transition: background var(--transition), transform var(--transition);
   cursor: pointer;
 }
 .request-row:last-child { border-bottom: none; }
-.request-row:hover { background: var(--bg-3); }
+.request-row:hover { background: var(--bg-3); transform: translateY(-1px); }
 
 .blood-badge {
   width: 40px; height: 40px;
@@ -480,6 +492,13 @@ html, body, #root {
   flex-direction: column;
   min-height: 0;
 }
+
+.form-page h2 {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 1.5rem; font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+.form-page .page-sub { color: var(--text-3); font-size: 0.95rem; margin-bottom: 1rem; }
 
 .request-layout {
   display: grid;
@@ -983,6 +1002,103 @@ tbody td { padding: 0.8rem 1.1rem; font-size: 0.85rem; vertical-align: middle; }
 .animate-in { animation: fadeIn 0.4s ease both; }
 
 .section-gap { display: flex; flex-direction: column; gap: 1.25rem; }
+
+/* ── Manager Login ───────────────────────────────── */
+.manager-page {
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.manager-hero {
+  background: linear-gradient(135deg, rgba(200,25,45,0.08), rgba(255,255,255,0.9));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.3rem 1.35rem;
+  box-shadow: var(--shadow-card);
+}
+
+.manager-hero h2 {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 1.5rem;
+  margin: 0.35rem 0 0.3rem;
+}
+
+.manager-hero p {
+  color: var(--text-3);
+  font-size: 0.95rem;
+  max-width: 60ch;
+}
+
+.manager-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.manager-card {
+  padding: 1.25rem;
+}
+
+.manager-form-grid {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.manager-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.manager-error {
+  padding: 0.8rem 0.95rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(200,25,45,0.18);
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.manager-session-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.9rem;
+}
+
+.manager-session-grid > div {
+  padding: 0.95rem 1rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+}
+
+.manager-label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin-bottom: 0.35rem;
+}
+
+.manager-session-grid strong {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 0.95rem;
+  color: var(--text);
+}
 
 /* ── Glow orbs ────────────────────────────────────── */
 .orb {

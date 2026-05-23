@@ -35,6 +35,15 @@ CREATE TABLE IF NOT EXISTS `notification_logs` (
   FOREIGN KEY (`student_id`) REFERENCES `students`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS `managers` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `name` VARCHAR(120) NOT NULL,
+  `gmail` VARCHAR(255) NOT NULL UNIQUE,
+  `is_primary` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
 -- Helpful sample index for common filter
 CREATE INDEX IF NOT EXISTS idx_students_blood_lastdonation ON `students` (`blood_group`, `last_donation_date`);
 
@@ -42,3 +51,6 @@ CREATE INDEX IF NOT EXISTS idx_students_blood_lastdonation ON `students` (`blood
 INSERT INTO `students` (`name`, `admission_no`, `phone_no`, `blood_group`, `last_donation_date`) VALUES
 ('Asha Sharma', 'A1001', '+919900000001', 'A+', NULL),
 ('Ravi Kumar', 'A1002', '+919900000002', 'B+', '2025-12-01');
+
+INSERT INTO `managers` (`name`, `gmail`, `is_primary`) VALUES
+('Fast Forward India Manager', 'manager@fastforwardindia.org', 1);

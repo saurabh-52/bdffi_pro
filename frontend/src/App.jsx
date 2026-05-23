@@ -90,11 +90,11 @@ const BLOOD_NOTIFICATION_LOGS = [
   { id: 6, donor: 'Sneha Reddy', request: 'Arjun Das (A+)', status: 'accepted', time: '3 hr ago', msg: 'Donor confirmed. NGO notified.' },
 ];
 
-const ADMIN_NOTIFICATION_LOGS = [
-  { id: 1, donor: 'Admin', request: 'Imported donor sheet', status: 'accepted', time: '5 min ago', msg: 'Active Excel sheet replaced and saved to backend.' },
-  { id: 2, donor: 'Admin', request: 'Deleted donor sheet', status: 'declined', time: '18 min ago', msg: 'Current active sheet was cleared from backend storage.' },
-  { id: 3, donor: 'Admin', request: 'Updated donor source', status: 'sent', time: '1 hr ago', msg: 'Fresh donor sheet synchronized for all users.' },
-  { id: 4, donor: 'Admin', request: 'Opened sheet preview', status: 'pending', time: '2 hr ago', msg: 'Viewed the active donor sheet before export.' },
+const MANAGER_NOTIFICATION_LOGS = [
+  { id: 1, donor: 'Manager', request: 'Imported donor sheet', status: 'accepted', time: '5 min ago', msg: 'Active Excel sheet replaced and saved to backend.' },
+  { id: 2, donor: 'Manager', request: 'Deleted donor sheet', status: 'declined', time: '18 min ago', msg: 'Current active sheet was cleared from backend storage.' },
+  { id: 3, donor: 'Manager', request: 'Updated donor source', status: 'sent', time: '1 hr ago', msg: 'Fresh donor sheet synchronized for all users.' },
+  { id: 4, donor: 'Manager', request: 'Opened sheet preview', status: 'pending', time: '2 hr ago', msg: 'Viewed the active donor sheet before export.' },
 ];
 
 const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
@@ -202,6 +202,18 @@ function formatSheetTime(value) {
 
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+async function readResponseData(response) {
+  const text = await response.text();
+
+  if (!text) return {};
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { message: text };
+  }
 }
 
 async function readPersistedSheet() {
@@ -358,7 +370,7 @@ function RequestItem({ request }) {
 }
 
 // ── Dashboard View ─────────────────────────────────────────
-function DashboardView({ donors, requests, onSeeAllNotifications }) {
+function DashboardView({ donors, requests, onSeeAllNotifications, onSeeAllRequests }) {
   const eligibleCount = donors.filter(donor => donor.eligible).length;
   const bloodCounts = getBloodCounts(donors);
   const recentBloodNotifications = BLOOD_NOTIFICATION_LOGS.slice(0, 5);
@@ -383,7 +395,12 @@ function DashboardView({ donors, requests, onSeeAllNotifications }) {
                   <h3>Recent Requests</h3>
                   <p>Latest blood donation requisitions</p>
                 </div>
-                <span className="status-pill active">Live</span>
+                <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
+                  <span className="status-pill active">Live</span>
+                  <button type="button" className="action-btn notify see-all-btn" onClick={onSeeAllRequests} style={{ fontSize: '0.8rem' }}>
+                    See All
+                  </button>
+                </div>
               </div>
             </div>
             <div className="request-list">
@@ -472,6 +489,8 @@ function RequestView({ donors = [], onCreateRequest }) {
 
   return (
     <div className="form-page animate-in">
+      <h2>New Donation Request</h2>
+      <p className="page-sub">Upload a medical requisition form or fill in the details manually. Matched donors will be notified via WhatsApp automatically.</p>
       <div className="request-layout">
         <div className="form-card card form-card-full">
           {/* Upload zone */}
@@ -576,6 +595,7 @@ function RequestView({ donors = [], onCreateRequest }) {
 // ── Recent Requests View ──────────────────────────────────
 function RecentRequestsView({ requests }) {
   const [periodFilter, setPeriodFilter] = useState('all');
+  const [detailsList, setDetailsList] = useState(null);
   const filteredRequests = requests.filter(request => {
     if (periodFilter === 'all') return true;
     const p = getRequestPeriod(request.createdAt);
@@ -588,6 +608,49 @@ function RecentRequestsView({ requests }) {
 
   return (
     <div className="section-gap animate-in">
+      <div style={{ marginBottom: '0.75rem' }}>
+        <div className="stats-row" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
+          <StatCard value="18" label="Sent" icon="📤" color="blue" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='sent'))} />
+          <StatCard value="9" label="Accepted" icon="✅" color="green" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='accepted'))} />
+          <StatCard value="4" label="Declined" icon="❌" color="red" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='declined'))} />
+          <StatCard value="5" label="Awaiting" icon="⏳" color="amber" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='pending'))} />
+        </div>
+        {detailsList && (
+          <div className="sheet-modal-backdrop" onClick={() => setDetailsList(null)}>
+            <div className="sheet-modal card" onClick={e => e.stopPropagation()}>
+              <div className="card-header">
+                <div>
+                  <h3>Notification Details</h3>
+                  <p>{detailsList.length} record(s)</p>
+                </div>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button className="action-btn notify" onClick={() => setDetailsList(null)}>Close</button>
+                </div>
+              </div>
+              <div style={{ marginTop: '0.5rem' }}>
+                {detailsList.length === 0 ? (
+                  <div style={{ color: 'var(--text-3)' }}>No records</div>
+                ) : (
+                  detailsList.map(d => (
+                    <div key={d.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.6rem 0', borderBottom: '1px dashed var(--border)' }}>
+                      <div>
+                        <div style={{ fontWeight: 700 }}>{d.donor}</div>
+                        <div style={{ fontSize: '0.9rem', color: 'var(--text-3)' }}>{d.msg}</div>
+                        <div style={{ fontSize: '0.85rem', color: 'var(--text-3)' }}>{d.request}</div>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>{d.status}</div>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--text-3)' }}>{d.time}</div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="card recent-requests-card">
         <div className="card-header">
           <div>
@@ -881,14 +944,13 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta }) {
 function LogsView() {
   const iconMap = { sent: '📤', accepted: '✅', declined: '❌', pending: '⏳' };
   const [logType, setLogType] = useState('blood');
-  const [detailsList, setDetailsList] = useState(null);
 
-  const activeLogs = logType === 'blood' ? BLOOD_NOTIFICATION_LOGS : ADMIN_NOTIFICATION_LOGS;
+  const activeLogs = logType === 'blood' ? BLOOD_NOTIFICATION_LOGS : MANAGER_NOTIFICATION_LOGS;
 
   return (
     <div className="logs-page animate-in">
       <h2>Notification Log</h2>
-      <p className="page-sub">Track blood-donation notifications and admin actions separately. Blood-donation activity is shown by default.</p>
+      <p className="page-sub">Track blood-donation notifications and manager actions separately. Blood-donation activity is shown by default.</p>
 
       <div className="log-toggle">
         <button
@@ -900,55 +962,14 @@ function LogsView() {
         </button>
         <button
           type="button"
-          className={`log-toggle-btn ${logType === 'admin' ? 'active' : ''}`}
-          onClick={() => setLogType('admin')}
+          className={`log-toggle-btn ${logType === 'manager' ? 'active' : ''}`}
+          onClick={() => setLogType('manager')}
         >
-          Admin Action
+          Manager Action
         </button>
       </div>
 
-      <div style={{ marginBottom: '0.75rem' }}>
-        <div className="stats-row" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
-          <StatCard value="18" label="Sent" icon="📤" color="blue" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='sent'))} />
-          <StatCard value="9" label="Accepted" icon="✅" color="green" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='accepted'))} />
-          <StatCard value="4" label="Declined" icon="❌" color="red" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='declined'))} />
-          <StatCard value="5" label="Awaiting" icon="⏳" color="amber" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='pending'))} />
-        </div>
-        {detailsList && (
-          <div className="sheet-modal-backdrop" onClick={() => setDetailsList(null)}>
-            <div className="sheet-modal card" onClick={e => e.stopPropagation()}>
-              <div className="card-header">
-                <div>
-                  <h3>Notification Details</h3>
-                  <p>{detailsList.length} record(s)</p>
-                </div>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                  <button className="action-btn notify" onClick={() => setDetailsList(null)}>Close</button>
-                </div>
-              </div>
-              <div style={{ marginTop: '0.5rem' }}>
-                {detailsList.length === 0 ? (
-                  <div style={{ color: 'var(--text-3)' }}>No records</div>
-                ) : (
-                  detailsList.map(d => (
-                    <div key={d.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.6rem 0', borderBottom: '1px dashed var(--border)' }}>
-                      <div>
-                        <div style={{ fontWeight: 700 }}>{d.donor}</div>
-                        <div style={{ fontSize: '0.9rem', color: 'var(--text-3)' }}>{d.msg}</div>
-                        <div style={{ fontSize: '0.85rem', color: 'var(--text-3)' }}>{d.request}</div>
-                      </div>
-                      <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>{d.status}</div>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--text-3)' }}>{d.time}</div>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
+      
 
       <div className="card">
         <div className="log-list">
@@ -971,12 +992,136 @@ function LogsView() {
   );
 }
 
+// ── Manager Login View ─────────────────────────────────────
+function ManagerLoginView({ managerSession, onLoginSuccess, onLogout }) {
+  const [gmail, setGmail] = useState(managerSession?.gmail || '');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setGmail(managerSession?.gmail || '');
+  }, [managerSession?.gmail]);
+
+  const handleLogin = async event => {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+
+    try {
+      const response = await fetch('/api/manager/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gmail }),
+      });
+      const data = await readResponseData(response);
+
+      if (!response.ok) {
+        throw new Error(data.message || 'Manager login failed.');
+      }
+
+      onLoginSuccess?.(data);
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : 'Manager login failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (managerSession) {
+    return (
+      <div className="manager-page animate-in">
+        <div className="manager-hero">
+          <div className="manager-badge">Manager Access</div>
+          <h2>Signed in as the primary manager</h2>
+          <p>Only the single seeded Gmail account can access this page.</p>
+        </div>
+
+        <div className="manager-card card">
+          <div className="card-header">
+            <div>
+              <h3>Manager Session</h3>
+              <p>Authenticated via seeded backend Gmail</p>
+            </div>
+            <button type="button" className="action-btn notify" onClick={onLogout}>Logout</button>
+          </div>
+
+          <div className="manager-session-grid">
+            <div>
+              <span className="manager-label">Name</span>
+              <strong>{managerSession.name}</strong>
+            </div>
+            <div>
+              <span className="manager-label">Gmail</span>
+              <strong>{managerSession.gmail}</strong>
+            </div>
+            <div>
+              <span className="manager-label">Access</span>
+              <strong>Primary Manager Only</strong>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="manager-page animate-in">
+      <div className="manager-hero">
+        <div className="manager-badge">Manager Login</div>
+        <h2>Sign in with the seeded Gmail account</h2>
+        <p>There is only one manager account in the backend. Enter that Gmail to unlock manager access.</p>
+      </div>
+
+      <form className="manager-card card" onSubmit={handleLogin}>
+        <div className="card-header">
+          <div>
+            <h3>Restricted Access</h3>
+            <p>Only the backend-seeded Gmail is allowed</p>
+          </div>
+        </div>
+
+        <div className="manager-form-grid">
+          <div className="field">
+            <label htmlFor="managerGmail">Manager Gmail</label>
+            <input
+              id="managerGmail"
+              type="email"
+              value={gmail}
+              onChange={e => setGmail(e.target.value)}
+              placeholder="manager@fastforwardindia.org"
+              autoComplete="email"
+              required
+            />
+          </div>
+
+          {error && <div className="manager-error">{error}</div>}
+
+          <div className="manager-actions">
+            <button type="submit" className="btn btn-primary" disabled={loading}>
+              {loading ? '⏳ Checking…' : '🔐 Login'}
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 // ── App Shell ──────────────────────────────────────────────
 export default function App() {
   const [view, setView] = useState('dashboard');
   const [donors, setDonors] = useState(MOCK_DONORS);
   const [requests, setRequests] = useState(MOCK_REQUESTS);
   const [sheetMeta, setSheetMeta] = useState(null);
+  const [managerSession, setManagerSession] = useState(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const stored = window.localStorage.getItem('manager-session');
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      return null;
+    }
+  });
 
   useEffect(() => {
     let active = true;
@@ -1009,12 +1154,23 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    if (managerSession) {
+      window.localStorage.setItem('manager-session', JSON.stringify(managerSession));
+    } else {
+      window.localStorage.removeItem('manager-session');
+    }
+  }, [managerSession]);
+
   const PAGE_TITLES = {
     dashboard: { title: 'Operator Dashboard', sub: 'Real-time overview of all donation activity' },
     request:   { title: 'New Donation Request', sub: 'Submit or upload a blood requisition form' },
     recent:    { title: 'Recent Requests', sub: 'Browse the latest request statuses and matches' },
     donors:    { title: 'Donor Management', sub: 'Browse and notify eligible student donors' },
     logs:      { title: 'Notification Logs', sub: 'WhatsApp outreach status and donor replies' },
+    manager:   { title: 'Manager Login', sub: 'Restricted access for the seeded manager account' },
   };
 
   const { title, sub } = PAGE_TITLES[view];
@@ -1022,6 +1178,15 @@ export default function App() {
 
   const handleCreateRequest = request => {
     setRequests(currentRequests => [request, ...currentRequests]);
+  };
+
+  const handleManagerLoginSuccess = nextManagerSession => {
+    setManagerSession(nextManagerSession);
+    setView('manager');
+  };
+
+  const handleManagerLogout = () => {
+    setManagerSession(null);
   };
 
   return (
@@ -1055,8 +1220,8 @@ export default function App() {
         <button className="nav-item">
           <span className="nav-icon">⚙️</span> Settings
         </button>
-        <button className="nav-item">
-          <span className="nav-icon">🔒</span> Admin Login
+        <button className={`nav-item ${view === 'manager' ? 'active' : ''}`} onClick={() => setView('manager')}>
+          <span className="nav-icon">🔒</span> Manager Login
         </button>
 
         <div style={{ marginTop: 'auto', paddingTop: '1rem' }}>
@@ -1083,11 +1248,12 @@ export default function App() {
         </header>
 
         <div className={`content-area ${view === 'request' ? 'request-mode' : ''}`}>
-          {view === 'dashboard' && <DashboardView donors={donors} requests={requests} onSeeAllNotifications={() => setView('logs')} />}
+          {view === 'dashboard' && <DashboardView donors={donors} requests={requests} onSeeAllNotifications={() => setView('logs')} onSeeAllRequests={() => setView('recent')} />}
           {view === 'request'   && <RequestView donors={donors} onCreateRequest={handleCreateRequest} />}
           {view === 'recent'    && <RecentRequestsView requests={requests} />}
           {view === 'donors' && <DonorsView donors={donors} setDonors={setDonors} sheetMeta={sheetMeta} setSheetMeta={setSheetMeta} />}
           {view === 'logs'      && <LogsView />}
+          {view === 'manager'   && <ManagerLoginView managerSession={managerSession} onLoginSuccess={handleManagerLoginSuccess} onLogout={handleManagerLogout} />}
         </div>
       </div>
     </div>

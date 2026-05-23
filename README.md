@@ -35,6 +35,8 @@ This project is an automated blood donation requisition and matching system buil
     npx knex --knexfile knexfile.js seed:run
     ```
 
+    The manager login is seeded too. Use `manager@fastforwardindia.org` for the single manager account.
+
 5. **Start the backend**
     ```bash
     npm run dev
