@@ -1,0 +1,9 @@
+{
+  "id": 1,
+  "name": "Fast Forward India Manager",
+  "gmail": "manager@fastforwardindia.org",
+  "password": "Pass@Word",
+  "is_primary": true,
+  "reset_token": null,
+  "reset_expires": null
+}

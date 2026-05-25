@@ -306,6 +306,33 @@ function StatusPill({ status }) {
   return <span className={`status-pill ${status}`}>{map[status] || status}</span>;
 }
 
+function EyeToggleButton({ shown, onClick, label }) {
+  return (
+    <button
+      type="button"
+      className="action-btn"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      style={{ minWidth: '3.5rem' }}
+    >
+      <span aria-hidden="true" style={{ fontSize: '1rem' }}>{shown ? '🙈' : '👁'}</span>
+    </button>
+  );
+}
+
+function getPathState() {
+  if (typeof window === 'undefined') {
+    return { pathname: '/', token: '' };
+  }
+
+  const url = new URL(window.location.href);
+  return {
+    pathname: url.pathname,
+    token: url.searchParams.get('token') || url.searchParams.get('resetToken') || '',
+  };
+}
+
 // Small request item component with expandable details showing who was notified
 function RequestItem({ request }) {
   const [open, setOpen] = useState(false);
@@ -994,12 +1021,18 @@ function LogsView() {
 
 // ── Manager Login View ─────────────────────────────────────
 function ManagerLoginView({ managerSession, onLoginSuccess, onLogout }) {
-  const [gmail, setGmail] = useState(managerSession?.gmail || '');
+  const [managerEmail, setManagerEmail] = useState(managerSession?.gmail ? String(managerSession.gmail) : '');
+  const [password, setPassword] = useState('');
+  const [forgotMode, setForgotMode] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [forgotMessage, setForgotMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    setGmail(managerSession?.gmail || '');
+    setManagerEmail(managerSession?.gmail ? String(managerSession.gmail) : '');
+    setPassword('');
   }, [managerSession?.gmail]);
 
   const handleLogin = async event => {
@@ -1011,7 +1044,7 @@ function ManagerLoginView({ managerSession, onLoginSuccess, onLogout }) {
       const response = await fetch('/api/manager/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gmail }),
+        body: JSON.stringify({ id: managerEmail, password }),
       });
       const data = await readResponseData(response);
 
@@ -1027,20 +1060,41 @@ function ManagerLoginView({ managerSession, onLoginSuccess, onLogout }) {
     }
   };
 
+  const handleForgot = async event => {
+    event.preventDefault();
+    setForgotLoading(true);
+    setForgotMessage('');
+
+    try {
+      const response = await fetch('/api/manager/forgot/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: forgotEmail || managerEmail }),
+      });
+      const data = await readResponseData(response);
+
+      setForgotMessage(data?.message || 'If the email matches the seeded manager, a reset link has been sent.');
+    } catch (err) {
+      setForgotMessage(err instanceof Error ? err.message : 'Failed to request password reset.');
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
   if (managerSession) {
     return (
       <div className="manager-page animate-in">
         <div className="manager-hero">
           <div className="manager-badge">Manager Access</div>
           <h2>Signed in as the primary manager</h2>
-          <p>Only the single seeded Gmail account can access this page.</p>
+          <p>Only the single seeded manager email and password can access this page.</p>
         </div>
 
         <div className="manager-card card">
           <div className="card-header">
             <div>
               <h3>Manager Session</h3>
-              <p>Authenticated via seeded backend Gmail</p>
+              <p>Authenticated via seeded backend id and password</p>
             </div>
             <button type="button" className="action-btn notify" onClick={onLogout}>Logout</button>
           </div>
@@ -1051,7 +1105,7 @@ function ManagerLoginView({ managerSession, onLoginSuccess, onLogout }) {
               <strong>{managerSession.name}</strong>
             </div>
             <div>
-              <span className="manager-label">Gmail</span>
+              <span className="manager-label">Manager Email</span>
               <strong>{managerSession.gmail}</strong>
             </div>
             <div>
@@ -1068,37 +1122,206 @@ function ManagerLoginView({ managerSession, onLoginSuccess, onLogout }) {
     <div className="manager-page animate-in">
       <div className="manager-hero">
         <div className="manager-badge">Manager Login</div>
-        <h2>Sign in with the seeded Gmail account</h2>
-        <p>There is only one manager account in the backend. Enter that Gmail to unlock manager access.</p>
+        <h2>Sign in with the seeded manager credentials</h2>
+        <p>There is only one manager account in the backend. Enter the manager email and password to unlock access.</p>
       </div>
 
-      <form className="manager-card card" onSubmit={handleLogin}>
+      <form className="manager-card card" onSubmit={forgotMode ? handleForgot : handleLogin}>
         <div className="card-header">
           <div>
             <h3>Restricted Access</h3>
-            <p>Only the backend-seeded Gmail is allowed</p>
+            <p>Only the backend-seeded manager credentials are allowed</p>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <button type="button" className="action-btn" onClick={() => {
+              const next = !forgotMode;
+              setForgotMode(next);
+              setForgotMessage('');
+              setForgotEmail('');
+            }}>
+              {forgotMode ? 'Back to login' : 'Forgot password?'}
+            </button>
           </div>
         </div>
 
         <div className="manager-form-grid">
           <div className="field">
-            <label htmlFor="managerGmail">Manager Gmail</label>
+            <label htmlFor="managerEmail">Manager Email</label>
             <input
-              id="managerGmail"
+              id="managerEmail"
               type="email"
-              value={gmail}
-              onChange={e => setGmail(e.target.value)}
+              value={forgotMode ? forgotEmail : managerEmail}
+              onChange={e => forgotMode ? setForgotEmail(e.target.value) : setManagerEmail(e.target.value)}
               placeholder="manager@fastforwardindia.org"
               autoComplete="email"
               required
             />
           </div>
 
+          {!forgotMode && (
+            <div className="field">
+              <label htmlFor="managerPassword">Password</label>
+              <input
+                id="managerPassword"
+                type="password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                placeholder="Enter manager password"
+                autoComplete="current-password"
+                required
+              />
+            </div>
+          )}
+
           {error && <div className="manager-error">{error}</div>}
+          {forgotMessage && <div className="manager-info">{forgotMessage}</div>}
+
+          <div className="manager-actions">
+            <button type="submit" className="btn btn-primary" disabled={forgotMode ? forgotLoading : loading}>
+              {forgotMode ? (forgotLoading ? '⏳ Sending…' : '📧 Send Reset Link') : (loading ? '⏳ Checking…' : '🔐 Login')}
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ForgotPasswordPage() {
+  const pathState = getPathState();
+  const [token, setToken] = useState(pathState.token);
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !pathState.token) return;
+
+    const cleanUrl = new URL(window.location.href);
+    cleanUrl.searchParams.delete('token');
+    cleanUrl.searchParams.delete('resetToken');
+    window.history.replaceState({}, '', `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
+  }, [pathState.token]);
+
+  useEffect(() => {
+    setShowPassword(false);
+    setShowConfirmPassword(false);
+  }, []);
+
+  const handleSubmit = async event => {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+    setMessage('');
+
+    if (password !== confirmPassword) {
+      setLoading(false);
+      setError('Passwords do not match.');
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/manager/forgot/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, password }),
+      });
+      const data = await readResponseData(response);
+
+      if (!response.ok) {
+        throw new Error(data.message || 'Reset failed.');
+      }
+
+      setMessage(data.message || 'Password updated. You can now sign in.');
+      setPassword('');
+      setConfirmPassword('');
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Reset failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="manager-page animate-in">
+      <div className="manager-hero">
+        <div className="manager-badge">Reset Password</div>
+        <h2>Create a new manager password</h2>
+        <p>Open the link from your email and choose a new password.</p>
+      </div>
+
+      <form className="manager-card card" onSubmit={handleSubmit}>
+        <div className="card-header">
+          <div>
+            <h3>Forgot Password</h3>
+            <p>Reset link for the seeded manager account</p>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <button type="button" className="action-btn" onClick={() => { window.location.href = '/'; }}>
+              Back to login
+            </button>
+          </div>
+        </div>
+
+        <div className="manager-form-grid">
+          {!token && (
+            <div className="manager-info">
+              The reset link is missing its token. Please open the link from your email again.
+            </div>
+          )}
+
+          <div className="field">
+            <label htmlFor="newPassword">New Password</label>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <input
+                id="newPassword"
+                type={showPassword ? 'text' : 'password'}
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                placeholder="Enter a new password"
+                autoComplete="new-password"
+                required
+                style={{ flex: 1 }}
+              />
+              <EyeToggleButton
+                shown={showPassword}
+                onClick={() => setShowPassword(current => !current)}
+                label={showPassword ? 'Hide password' : 'Show password'}
+              />
+            </div>
+          </div>
+
+          <div className="field">
+            <label htmlFor="confirmPassword">Confirm Password</label>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <input
+                id="confirmPassword"
+                type={showConfirmPassword ? 'text' : 'password'}
+                value={confirmPassword}
+                onChange={e => setConfirmPassword(e.target.value)}
+                placeholder="Repeat the new password"
+                autoComplete="new-password"
+                required
+                style={{ flex: 1 }}
+              />
+              <EyeToggleButton
+                shown={showConfirmPassword}
+                onClick={() => setShowConfirmPassword(current => !current)}
+                label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
+              />
+            </div>
+          </div>
+
+          {error && <div className="manager-error">{error}</div>}
+          {message && <div className="manager-info">{message}</div>}
 
           <div className="manager-actions">
             <button type="submit" className="btn btn-primary" disabled={loading}>
-              {loading ? '⏳ Checking…' : '🔐 Login'}
+              {loading ? '⏳ Resetting…' : '🔁 Update Password'}
             </button>
           </div>
         </div>
@@ -1109,6 +1332,7 @@ function ManagerLoginView({ managerSession, onLoginSuccess, onLogout }) {
 
 // ── App Shell ──────────────────────────────────────────────
 export default function App() {
+  const pathState = getPathState();
   const [view, setView] = useState('dashboard');
   const [donors, setDonors] = useState(MOCK_DONORS);
   const [requests, setRequests] = useState(MOCK_REQUESTS);
@@ -1117,7 +1341,8 @@ export default function App() {
     if (typeof window === 'undefined') return null;
     try {
       const stored = window.localStorage.getItem('manager-session');
-      return stored ? JSON.parse(stored) : null;
+      const parsed = stored ? JSON.parse(stored) : null;
+      return parsed && parsed.id != null ? parsed : null;
     } catch {
       return null;
     }
@@ -1188,6 +1413,16 @@ export default function App() {
   const handleManagerLogout = () => {
     setManagerSession(null);
   };
+
+  useEffect(() => {
+    const handlePopState = () => setView(current => current);
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  if (typeof window !== 'undefined' && pathState.pathname === '/forgot-password') {
+    return <ForgotPasswordPage />;
+  }
 
   return (
     <div className="app">
