@@ -248,6 +248,68 @@ async function deletePersistedSheet() {
   return response.json();
 }
 
+async function readManagerAccounts() {
+  const response = await fetch('/api/managers');
+  if (!response.ok) {
+    throw new Error('Failed to load manager accounts from backend.');
+  }
+
+  return response.json();
+}
+
+async function createManagerAccount(payload) {
+  const response = await fetch('/api/managers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await readResponseData(response);
+
+  if (!response.ok) {
+    throw new Error(data.message || 'Failed to create manager account.');
+  }
+
+  return data;
+}
+
+async function deactivateManagerAccount(managerId) {
+  const response = await fetch(`/api/managers/${managerId}/deactivate`, { method: 'POST' });
+  const data = await readResponseData(response);
+
+  if (!response.ok) {
+    throw new Error(data.message || 'Failed to deactivate manager account.');
+  }
+
+  return data;
+}
+
+async function activateManagerAccount(managerId) {
+  const response = await fetch(`/api/managers/${managerId}/activate`, { method: 'POST' });
+  const data = await readResponseData(response);
+
+  if (!response.ok) {
+    throw new Error(data.message || 'Failed to activate manager account.');
+  }
+
+  return data;
+}
+
+async function updateGlobalWhatsAppAlerts(managerId, enabled) {
+  const response = await fetch(`/api/managers/${managerId}/alerts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await readResponseData(response);
+
+  if (!response.ok) {
+    throw new Error(data.message || 'Failed to update WhatsApp alerts setting.');
+  }
+
+  return data;
+}
+
 async function sendBrowserNotification(title, body) {
   if (typeof window === 'undefined' || !('Notification' in window)) return false;
 
@@ -323,13 +385,14 @@ function EyeToggleButton({ shown, onClick, label }) {
 
 function getPathState() {
   if (typeof window === 'undefined') {
-    return { pathname: '/', token: '' };
+    return { pathname: '/', token: '', view: '' };
   }
 
   const url = new URL(window.location.href);
   return {
     pathname: url.pathname,
     token: url.searchParams.get('token') || url.searchParams.get('resetToken') || '',
+    view: url.searchParams.get('view') || '',
   };
 }
 
@@ -706,11 +769,12 @@ function RecentRequestsView({ requests }) {
 }
 
 // ── Donors View ────────────────────────────────────────────
-function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta }) {
+function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlertsEnabled }) {
   const [search, setSearch] = useState('');
   const [filterBG, setFilterBG] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
   const [fileMessage, setFileMessage] = useState({ type: '', text: '' });
+  const [alertMessage, setAlertMessage] = useState({ type: '', text: '' });
   const [showSheetPreview, setShowSheetPreview] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -807,6 +871,28 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta }) {
     window.URL.revokeObjectURL(url);
   };
 
+  const notify = async donorId => {
+    const targetDonor = donors.find(donor => donor.id === donorId);
+
+    if (!whatsappAlertsEnabled) {
+      setAlertMessage({
+        type: 'error',
+        text: 'WhatsApp alerts are turned off globally. Enable them to send alerts.',
+      });
+      return;
+    }
+
+    if (!targetDonor) {
+      setAlertMessage({ type: 'error', text: 'Selected donor was not found.' });
+      return;
+    }
+
+    setAlertMessage({ type: '', text: '' });
+    setDonors(currentDonors => currentDonors.map(donor => (donor.id === donorId ? { ...donor, notified: true } : donor)));
+    setAlertMessage({ type: 'success', text: `WhatsApp alert sent to ${targetDonor.name || 'the selected donor'}.` });
+    await sendBrowserNotification('WhatsApp alert sent', `${targetDonor.name || 'Donor'} has been notified.`);
+  };
+
   const filtered = donors.filter(d => {
     const q = search.toLowerCase();
     const matchSearch = !q || (d.name || '').toLowerCase().includes(q) || (d.admission || '').toLowerCase().includes(q);
@@ -867,6 +953,7 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta }) {
       </div>
 
       {fileMessage.text && <div className={`import-banner ${fileMessage.type}`}>{fileMessage.text}</div>}
+      {alertMessage.text && <div className={`import-banner ${alertMessage.type}`}>{alertMessage.text}</div>}
 
       <div className="donor-table-wrap">
         <table>
@@ -968,11 +1055,11 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta }) {
 }
 
 // ── Logs View ──────────────────────────────────────────────
-function LogsView() {
+function LogsView({ managerLogs }) {
   const iconMap = { sent: '📤', accepted: '✅', declined: '❌', pending: '⏳' };
   const [logType, setLogType] = useState('blood');
 
-  const activeLogs = logType === 'blood' ? BLOOD_NOTIFICATION_LOGS : MANAGER_NOTIFICATION_LOGS;
+  const activeLogs = logType === 'blood' ? BLOOD_NOTIFICATION_LOGS : managerLogs;
 
   return (
     <div className="logs-page animate-in">
@@ -1019,8 +1106,335 @@ function LogsView() {
   );
 }
 
+function ManagerDashboardView({ managerSession, onLogout, onAddManager, onUpdateSession, onRecordAction, whatsappAlertsEnabled, onToggleWhatsAppAlerts }) {
+  const [managers, setManagers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [actionLoadingId, setActionLoadingId] = useState(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+
+    const loadManagers = async () => {
+      setLoading(true);
+      setError('');
+
+      try {
+        const accounts = await readManagerAccounts();
+        if (!active) return;
+        setManagers(Array.isArray(accounts) ? accounts : []);
+        const syncedManager = Array.isArray(accounts)
+          ? accounts.find(manager => manager.is_primary) || accounts[0]
+          : null;
+        if (syncedManager) {
+          onToggleWhatsAppAlerts?.(syncedManager.whatsapp_alerts_enabled !== false);
+        }
+      } catch (loadError) {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : 'Failed to load manager accounts.');
+          setManagers(managerSession ? [managerSession] : []);
+          if (managerSession) {
+            onToggleWhatsAppAlerts?.(managerSession.whatsapp_alerts_enabled !== false);
+          }
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
+      }
+    };
+
+    loadManagers();
+
+    return () => {
+      active = false;
+    };
+  }, [managerSession]);
+
+  const primaryManager = managers.find(manager => manager.is_primary) || managerSession;
+  const currentManagerId = Number(managerSession?.id);
+  const activeManagers = managers.filter(manager => manager.is_primary || manager.is_active);
+  const deactivatedManagers = managers.filter(manager => !manager.is_primary && !manager.is_active);
+  const handleDeactivate = async manager => {
+    const confirmed = window.confirm(`Deactivate ${manager.gmail}? You will be logged out immediately and must activate the account to sign back in.`);
+    if (!confirmed) {
+      return;
+    }
+
+    setActionLoadingId(manager.id);
+    setError('');
+
+    try {
+      await deactivateManagerAccount(manager.id);
+      setManagers(current => current.filter(item => item.id !== manager.id));
+
+      if (Number(managerSession?.id) === Number(manager.id)) {
+        onLogout?.();
+      }
+    } catch (deactivateError) {
+      setError(deactivateError instanceof Error ? deactivateError.message : 'Failed to deactivate manager account.');
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleToggleAlerts = async manager => {
+    const nextEnabled = !whatsappAlertsEnabled;
+    const confirmed = window.confirm(
+      `${nextEnabled ? 'Enable' : 'Disable'} WhatsApp alerts for all users? This change applies globally.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setActionLoadingId(manager.id);
+    setError('');
+
+    try {
+      const updatedManager = await updateGlobalWhatsAppAlerts(manager.id, nextEnabled);
+      setManagers(current => current.map(item => ({ ...item, whatsapp_alerts_enabled: updatedManager.whatsapp_alerts_enabled })));
+      onUpdateSession?.({ ...managerSession, whatsapp_alerts_enabled: updatedManager.whatsapp_alerts_enabled });
+      onToggleWhatsAppAlerts?.(updatedManager.whatsapp_alerts_enabled);
+      onRecordAction?.({
+        request: updatedManager.whatsapp_alerts_enabled ? 'Enabled global WhatsApp alerts' : 'Disabled global WhatsApp alerts',
+        status: updatedManager.whatsapp_alerts_enabled ? 'accepted' : 'declined',
+        msg: `${managerSession?.name || updatedManager.name} turned ${updatedManager.whatsapp_alerts_enabled ? 'on' : 'off'} WhatsApp alerts for all users.`,
+      });
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : 'Failed to update WhatsApp alerts setting.');
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  return (
+    <div className="manager-page animate-in">
+      <div className="manager-hero manager-dashboard-hero">
+        <div className="manager-badge">Manager Dashboard</div>
+        <h2>Manage manager Gmail accounts</h2>
+        <p>Signed in as {managerSession?.gmail || 'a manager'} and able to add more manager accounts from this screen.</p>
+          <div className="manager-dashboard-hero-meta">
+          <div>
+            <span className="manager-label">Current session</span>
+            <strong>{managerSession?.gmail}</strong>
+          </div>
+          <div className="global-alert-toggle">
+            <label className={`switch ${actionLoadingId != null ? 'disabled' : ''}`}>
+              <input
+                type="checkbox"
+                checked={whatsappAlertsEnabled}
+                disabled={actionLoadingId != null}
+                onChange={() => handleToggleAlerts(managerSession)}
+              />
+              <span className="slider" />
+            </label>
+            <div className="toggle-label">{whatsappAlertsEnabled ? 'Alerts On' : 'Alerts Off'}</div>
+          </div>
+          <button type="button" className="action-btn notify logout-btn" onClick={onLogout}>
+            <span className="logout-arrow">←</span>
+            Logout
+          </button>
+        </div>
+      </div>
+
+      <div className="manager-dashboard-grid">
+        <div className="manager-card card">
+          <div className="card-header">
+            <div>
+              <h3>Active Accounts</h3>
+              <p>{loading ? 'Loading accounts…' : `${activeManagers.length} active account${activeManagers.length === 1 ? '' : 's'}`}</p>
+            </div>
+            <button type="button" className="btn btn-primary manager-card-action" onClick={onAddManager}>
+              ➕ Add Account
+            </button>
+          </div>
+
+          <div className="manager-self-service-note">
+            You can only deactivate your own account. You will be asked to confirm and then logged out immediately.
+          </div>
+
+          <div className="manager-summary-grid">
+            <div>
+              <span className="manager-label">Primary Manager</span>
+              <strong>{primaryManager?.gmail || 'Not available'}</strong>
+            </div>
+            <div>
+              <span className="manager-label">Total Accounts</span>
+              <strong>{managers.length}</strong>
+            </div>
+          </div>
+
+          <div className="manager-account-list">
+            {activeManagers.map(manager => (
+              <div key={manager.id || manager.gmail} className="manager-account-item">
+                <div>
+                  <strong>{manager.name}</strong>
+                  <span>{manager.gmail}</span>
+                </div>
+                <div className="manager-account-actions">
+                  <div className={`manager-account-badge ${manager.is_primary ? 'primary' : ''}`}>
+                    {manager.is_primary ? 'Primary' : 'Manager'}
+                  </div>
+                  {!manager.is_primary && currentManagerId === Number(manager.id) && (
+                    <button
+                      type="button"
+                      className="manager-deactivate-btn"
+                      disabled={actionLoadingId === manager.id}
+                      onClick={() => handleDeactivate(manager)}
+                    >
+                      {actionLoadingId === manager.id ? '…' : 'Deactivate'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+            {!loading && activeManagers.length === 0 && (
+              <div className="manager-info">No manager accounts found yet.</div>
+            )}
+          </div>
+        </div>
+
+        <div className="manager-card card">
+          <div className="card-header">
+            <div>
+              <h3>Deactivated Accounts</h3>
+              <p>{loading ? 'Loading accounts…' : `${deactivatedManagers.length} deactivated account${deactivatedManagers.length === 1 ? '' : 's'}`}</p>
+            </div>
+          </div>
+
+          <div className="manager-account-list">
+            {deactivatedManagers.map(manager => (
+              <div key={manager.id || manager.gmail} className="manager-account-item inactive">
+                <div>
+                  <strong>{manager.name}</strong>
+                  <span>{manager.gmail}</span>
+                </div>
+                <div className="manager-account-actions">
+                  <div className="manager-account-badge inactive">Deactivated</div>
+                </div>
+              </div>
+            ))}
+            {!loading && deactivatedManagers.length === 0 && (
+              <div className="manager-info">No deactivated accounts.</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ManagerAddAccountView({ managerSession, onLogout, onBackToDashboard }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [form, setForm] = useState({ name: '', gmail: '' });
+  const [tempPassword, setTempPassword] = useState(() => generateTemporaryPassword());
+
+  function generateTemporaryPassword() {
+    if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
+      const bytes = new Uint8Array(12);
+      window.crypto.getRandomValues(bytes);
+      return Array.from(bytes, byte => (byte % 36).toString(36)).join('').slice(0, 12);
+    }
+
+    return `tmp-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
+  }
+
+  const handleChange = event => {
+    const { name, value } = event.target;
+    setForm(current => ({ ...current, [name]: value }));
+  };
+
+  const handleSubmit = async event => {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+    setMessage('');
+
+    try {
+      const createdManager = await createManagerAccount({ ...form, password: tempPassword });
+      setForm({ name: '', gmail: '' });
+      setTempPassword(generateTemporaryPassword());
+      setMessage(createdManager.tempPassword
+        ? `Added ${createdManager.gmail}. Temporary password: ${createdManager.tempPassword}`
+        : `Added ${createdManager.gmail}. The temporary password was emailed to the new manager.`);
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : 'Failed to create manager account.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="manager-page animate-in">
+      <div className="manager-hero">
+        <div className="manager-badge">Add Manager</div>
+        <h2>Create a new manager account</h2>
+        <p>Add a Gmail-based manager login from its own page.</p>
+        <div className="manager-dashboard-hero-meta">
+          <div>
+            <span className="manager-label">Current session</span>
+            <strong>{managerSession?.gmail}</strong>
+          </div>
+          <button type="button" className="action-btn notify" onClick={onLogout}>Logout</button>
+        </div>
+      </div>
+
+      <form className="manager-card card manager-form-page" onSubmit={handleSubmit}>
+        <div className="card-header">
+          <div>
+            <h3>Manager Details</h3>
+            <p>Enter the new manager name, Gmail address, and password</p>
+          </div>
+          <button type="button" className="action-btn" onClick={onBackToDashboard}>Back to dashboard</button>
+        </div>
+
+        <div className="manager-form-grid">
+          <div className="field">
+            <label htmlFor="managerName">Manager Name</label>
+            <input
+              id="managerName"
+              name="name"
+              type="text"
+              value={form.name}
+              onChange={handleChange}
+              placeholder="Fast Forward India Manager"
+              required
+            />
+          </div>
+
+          <div className="field">
+            <label htmlFor="managerGmail">Manager Gmail</label>
+            <input
+              id="managerGmail"
+              name="gmail"
+              type="email"
+              value={form.gmail}
+              onChange={handleChange}
+              placeholder="manager2@fastforwardindia.org"
+              autoComplete="email"
+              required
+            />
+          </div>
+
+          {error && <div className="manager-error">{error}</div>}
+          {message && <div className="manager-info">{message}</div>}
+
+          <div className="manager-actions manager-actions-right">
+            <button type="submit" className="btn btn-primary" disabled={loading}>
+              {loading ? '⏳ Saving…' : '➕ Add Manager'}
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 // ── Manager Login View ─────────────────────────────────────
-function ManagerLoginView({ managerSession, onLoginSuccess, onLogout }) {
+function ManagerLoginView({ managerSession, onLoginSuccess }) {
   const [managerEmail, setManagerEmail] = useState(managerSession?.gmail ? String(managerSession.gmail) : '');
   const [password, setPassword] = useState('');
   const [forgotMode, setForgotMode] = useState(false);
@@ -1029,6 +1443,8 @@ function ManagerLoginView({ managerSession, onLoginSuccess, onLogout }) {
   const [forgotMessage, setForgotMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [activationPrompt, setActivationPrompt] = useState(null);
+  const [activationLoading, setActivationLoading] = useState(false);
 
   useEffect(() => {
     setManagerEmail(managerSession?.gmail ? String(managerSession.gmail) : '');
@@ -1049,14 +1465,42 @@ function ManagerLoginView({ managerSession, onLoginSuccess, onLogout }) {
       const data = await readResponseData(response);
 
       if (!response.ok) {
+        if (response.status === 423 && data?.inactive && data?.manager) {
+          setActivationPrompt({
+            id: data.manager.id,
+            gmail: data.manager.gmail,
+            password,
+          });
+          setError(data.message || 'Your account is deactivated.');
+          return;
+        }
+
         throw new Error(data.message || 'Manager login failed.');
       }
 
+      setActivationPrompt(null);
       onLoginSuccess?.(data);
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : 'Manager login failed.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleActivateAccount = async () => {
+    if (!activationPrompt) return;
+
+    setActivationLoading(true);
+    setError('');
+
+    try {
+      const activatedManager = await activateManagerAccount(activationPrompt.id);
+      setActivationPrompt(null);
+      onLoginSuccess?.(activatedManager);
+    } catch (activateError) {
+      setError(activateError instanceof Error ? activateError.message : 'Failed to activate manager account.');
+    } finally {
+      setActivationLoading(false);
     }
   };
 
@@ -1081,56 +1525,19 @@ function ManagerLoginView({ managerSession, onLoginSuccess, onLogout }) {
     }
   };
 
-  if (managerSession) {
-    return (
-      <div className="manager-page animate-in">
-        <div className="manager-hero">
-          <div className="manager-badge">Manager Access</div>
-          <h2>Signed in as the primary manager</h2>
-          <p>Only the single seeded manager email and password can access this page.</p>
-        </div>
-
-        <div className="manager-card card">
-          <div className="card-header">
-            <div>
-              <h3>Manager Session</h3>
-              <p>Authenticated via seeded backend id and password</p>
-            </div>
-            <button type="button" className="action-btn notify" onClick={onLogout}>Logout</button>
-          </div>
-
-          <div className="manager-session-grid">
-            <div>
-              <span className="manager-label">Name</span>
-              <strong>{managerSession.name}</strong>
-            </div>
-            <div>
-              <span className="manager-label">Manager Email</span>
-              <strong>{managerSession.gmail}</strong>
-            </div>
-            <div>
-              <span className="manager-label">Access</span>
-              <strong>Primary Manager Only</strong>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="manager-page animate-in">
       <div className="manager-hero">
         <div className="manager-badge">Manager Login</div>
-        <h2>Sign in with the seeded manager credentials</h2>
-        <p>There is only one manager account in the backend. Enter the manager email and password to unlock access.</p>
+        <h2>Sign in with a manager account</h2>
+        <p>Enter a valid manager Gmail and password to open the manager dashboard.</p>
       </div>
 
       <form className="manager-card card" onSubmit={forgotMode ? handleForgot : handleLogin}>
         <div className="card-header">
           <div>
             <h3>Restricted Access</h3>
-            <p>Only the backend-seeded manager credentials are allowed</p>
+            <p>Manager credentials are validated against the backend</p>
           </div>
           <div style={{ textAlign: 'right' }}>
             <button type="button" className="action-btn" onClick={() => {
@@ -1175,6 +1582,17 @@ function ManagerLoginView({ managerSession, onLoginSuccess, onLogout }) {
 
           {error && <div className="manager-error">{error}</div>}
           {forgotMessage && <div className="manager-info">{forgotMessage}</div>}
+          {activationPrompt && (
+            <div className="manager-activation-prompt">
+              <div>
+                <strong>This account is deactivated.</strong>
+                <span>Activate {activationPrompt.gmail} to continue.</span>
+              </div>
+              <button type="button" className="btn btn-primary" onClick={handleActivateAccount} disabled={activationLoading}>
+                {activationLoading ? '⏳ Activating…' : 'Activate Account'}
+              </button>
+            </div>
+          )}
 
           <div className="manager-actions">
             <button type="submit" className="btn btn-primary" disabled={forgotMode ? forgotLoading : loading}>
@@ -1333,16 +1751,32 @@ function ForgotPasswordPage() {
 // ── App Shell ──────────────────────────────────────────────
 export default function App() {
   const pathState = getPathState();
-  const [view, setView] = useState('dashboard');
+  const [view, setView] = useState(() => {
+    if (pathState.view === 'manager') return 'manager';
+    if (pathState.view === 'add-manager') return 'add-manager';
+    return 'dashboard';
+  });
   const [donors, setDonors] = useState(MOCK_DONORS);
   const [requests, setRequests] = useState(MOCK_REQUESTS);
   const [sheetMeta, setSheetMeta] = useState(null);
+  const [whatsappAlertsEnabled, setWhatsAppAlertsEnabled] = useState(() => {
+    if (typeof window === 'undefined') return true;
+
+    try {
+      const stored = window.localStorage.getItem('manager-session');
+      const parsed = stored ? JSON.parse(stored) : null;
+      return parsed ? parsed.whatsapp_alerts_enabled !== false : true;
+    } catch {
+      return true;
+    }
+  });
+  const [managerLogs, setManagerLogs] = useState(MANAGER_NOTIFICATION_LOGS);
   const [managerSession, setManagerSession] = useState(() => {
     if (typeof window === 'undefined') return null;
     try {
       const stored = window.localStorage.getItem('manager-session');
       const parsed = stored ? JSON.parse(stored) : null;
-      return parsed && parsed.id != null ? parsed : null;
+      return parsed && parsed.id != null ? { ...parsed, whatsapp_alerts_enabled: parsed.whatsapp_alerts_enabled !== false } : null;
     } catch {
       return null;
     }
@@ -1389,6 +1823,13 @@ export default function App() {
     }
   }, [managerSession]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.location.hash) return;
+
+    const cleanUrl = `${window.location.pathname}${window.location.search}`;
+    window.history.replaceState({}, '', cleanUrl);
+  }, []);
+
   const PAGE_TITLES = {
     dashboard: { title: 'Operator Dashboard', sub: 'Real-time overview of all donation activity' },
     request:   { title: 'New Donation Request', sub: 'Submit or upload a blood requisition form' },
@@ -1396,9 +1837,15 @@ export default function App() {
     donors:    { title: 'Donor Management', sub: 'Browse and notify eligible student donors' },
     logs:      { title: 'Notification Logs', sub: 'WhatsApp outreach status and donor replies' },
     manager:   { title: 'Manager Login', sub: 'Restricted access for the seeded manager account' },
+    'add-manager': { title: 'Add Manager', sub: 'Create a new manager Gmail account' },
   };
 
-  const { title, sub } = PAGE_TITLES[view];
+  const activePage = view === 'manager'
+    ? (managerSession
+      ? { title: 'Manager Dashboard', sub: 'Add manager Gmail accounts and review access' }
+      : { title: 'Manager Login', sub: 'Restricted access for manager accounts' })
+    : PAGE_TITLES[view];
+  const { title, sub } = activePage;
   const navItems = NAV.map(item => item.key === 'donors' ? { ...item, badge: String(donors.length) } : item);
 
   const handleCreateRequest = request => {
@@ -1406,7 +1853,41 @@ export default function App() {
   };
 
   const handleManagerLoginSuccess = nextManagerSession => {
-    setManagerSession(nextManagerSession);
+    const normalizedSession = { ...nextManagerSession, whatsapp_alerts_enabled: nextManagerSession.whatsapp_alerts_enabled !== false };
+    setManagerSession(normalizedSession);
+    setWhatsAppAlertsEnabled(normalizedSession.whatsapp_alerts_enabled);
+    setView('manager');
+  };
+
+  const handleManagerSessionUpdate = nextManagerSession => {
+    const normalizedSession = { ...nextManagerSession, whatsapp_alerts_enabled: nextManagerSession.whatsapp_alerts_enabled !== false };
+    setManagerSession(normalizedSession);
+    setWhatsAppAlertsEnabled(normalizedSession.whatsapp_alerts_enabled);
+  };
+
+  const handleToggleWhatsAppAlerts = enabled => {
+    setWhatsAppAlertsEnabled(enabled);
+  };
+
+  const handleRecordManagerAction = entry => {
+    const nextLog = {
+      id: Date.now(),
+      donor: managerSession?.name || 'Manager',
+      request: entry.request,
+      status: entry.status || 'accepted',
+      time: 'just now',
+      msg: entry.msg,
+    };
+
+    setManagerLogs(current => [nextLog, ...current]);
+  };
+
+  const handleOpenAddManager = () => {
+    if (!managerSession) return;
+    setView('add-manager');
+  };
+
+  const handleBackToDashboard = () => {
     setView('manager');
   };
 
@@ -1486,9 +1967,15 @@ export default function App() {
           {view === 'dashboard' && <DashboardView donors={donors} requests={requests} onSeeAllNotifications={() => setView('logs')} onSeeAllRequests={() => setView('recent')} />}
           {view === 'request'   && <RequestView donors={donors} onCreateRequest={handleCreateRequest} />}
           {view === 'recent'    && <RecentRequestsView requests={requests} />}
-          {view === 'donors' && <DonorsView donors={donors} setDonors={setDonors} sheetMeta={sheetMeta} setSheetMeta={setSheetMeta} />}
-          {view === 'logs'      && <LogsView />}
-          {view === 'manager'   && <ManagerLoginView managerSession={managerSession} onLoginSuccess={handleManagerLoginSuccess} onLogout={handleManagerLogout} />}
+          {view === 'donors' && <DonorsView donors={donors} setDonors={setDonors} sheetMeta={sheetMeta} setSheetMeta={setSheetMeta} whatsappAlertsEnabled={whatsappAlertsEnabled} />}
+          {view === 'logs'      && <LogsView managerLogs={managerLogs} />}
+          {view === 'manager'   && (managerSession
+            ? <ManagerDashboardView managerSession={managerSession} onLogout={handleManagerLogout} onAddManager={handleOpenAddManager} onUpdateSession={handleManagerSessionUpdate} onRecordAction={handleRecordManagerAction} whatsappAlertsEnabled={whatsappAlertsEnabled} onToggleWhatsAppAlerts={handleToggleWhatsAppAlerts} />
+            : <ManagerLoginView managerSession={managerSession} onLoginSuccess={handleManagerLoginSuccess} />
+          )}
+          {view === 'add-manager' && managerSession && (
+            <ManagerAddAccountView managerSession={managerSession} onLogout={handleManagerLogout} onBackToDashboard={handleBackToDashboard} />
+          )}
         </div>
       </div>
     </div>

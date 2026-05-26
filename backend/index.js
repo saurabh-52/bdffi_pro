@@ -16,6 +16,8 @@ const PRIMARY_MANAGER = {
   gmail: String(process.env.SUPER_MANAGER_EMAIL || 'manager@fastforwardindia.org').trim().toLowerCase(),
   password: String(process.env.SUPER_MANAGER_PASSWORD || 'FFI-Manager-1234').trim(),
   is_primary: true,
+  is_active: true,
+  whatsapp_alerts_enabled: true,
 };
 
 app.use(express.json({ limit: '10mb' }));
@@ -60,22 +62,228 @@ async function writeManagerStore(nextManager) {
   await fs.writeFile(managerFilePath, JSON.stringify(nextManager, null, 2), 'utf8');
 }
 
+function isActiveFlag(value) {
+  return value === true || value === 1 || value === '1';
+}
+
+function isAlertsEnabledFlag(value) {
+  return value === true || value === 1 || value === '1';
+}
+
+async function ensureManagersTable() {
+  const hasTable = await db.schema.hasTable('managers');
+
+  if (!hasTable) {
+    await db.schema.createTable('managers', function(table) {
+      table.increments('id').primary();
+      table.string('name', 120).notNullable();
+      table.string('gmail', 255).notNullable().unique();
+      table.string('password', 120).notNullable().defaultTo('FFI-Manager-1234');
+      table.boolean('is_primary').notNullable().defaultTo(true);
+      table.boolean('is_active').notNullable().defaultTo(true);
+      table.boolean('whatsapp_alerts_enabled').notNullable().defaultTo(true);
+      table.string('reset_token', 128).nullable();
+      table.timestamp('reset_expires').nullable();
+      table.timestamp('created_at').defaultTo(db.fn.now());
+      table.timestamp('updated_at').defaultTo(db.fn.now());
+    });
+  } else {
+    if (!(await db.schema.hasColumn('managers', 'is_active'))) {
+      await db.schema.alterTable('managers', function(table) {
+        table.boolean('is_active').notNullable().defaultTo(true);
+      });
+    }
+
+    if (!(await db.schema.hasColumn('managers', 'whatsapp_alerts_enabled'))) {
+      await db.schema.alterTable('managers', function(table) {
+        table.boolean('whatsapp_alerts_enabled').notNullable().defaultTo(true);
+      });
+    }
+
+    if (!(await db.schema.hasColumn('managers', 'reset_token'))) {
+      await db.schema.alterTable('managers', function(table) {
+        table.string('reset_token', 128).nullable();
+      });
+    }
+
+    if (!(await db.schema.hasColumn('managers', 'reset_expires'))) {
+      await db.schema.alterTable('managers', function(table) {
+        table.timestamp('reset_expires').nullable();
+      });
+    }
+  }
+
+  const primaryManager = await db('managers').where('is_primary', true).first();
+  if (!primaryManager) {
+    const manager = await readManagerStore().catch(() => PRIMARY_MANAGER);
+    const primary = {
+      name: String(manager.name || PRIMARY_MANAGER.name).trim(),
+      gmail: String(manager.gmail || PRIMARY_MANAGER.gmail).trim().toLowerCase(),
+      password: String(manager.password || PRIMARY_MANAGER.password).trim(),
+      is_primary: true,
+      is_active: true,
+      whatsapp_alerts_enabled: true,
+    };
+
+    const existing = await db('managers').whereRaw('LOWER(gmail) = ?', [primary.gmail]).first();
+    if (!existing) {
+      await db('managers').insert({
+        ...primary,
+        created_at: db.fn.now(),
+        updated_at: db.fn.now(),
+      });
+    }
+  }
+}
+
 async function readPrimaryManager() {
+  await ensureManagersTable();
+
+  try {
+    const manager = await db('managers').where('is_primary', true).first();
+    if (manager) {
+      return manager;
+    }
+  } catch (error) {
+    // fall back to file storage below
+  }
+
   try {
     const manager = await readManagerStore();
     if (manager && manager.gmail) {
       return manager;
     }
   } catch (error) {
-    // fall back to DB / seed below
+    // fall back to the seeded default below
+  }
+
+  return PRIMARY_MANAGER;
+}
+
+function serializeManager(manager) {
+  if (!manager) return null;
+
+  return {
+    id: manager.id,
+    name: manager.name,
+    gmail: manager.gmail,
+    is_primary: Boolean(manager.is_primary),
+    is_active: isActiveFlag(manager.is_active),
+    whatsapp_alerts_enabled: isAlertsEnabledFlag(manager.whatsapp_alerts_enabled),
+    created_at: manager.created_at || null,
+    updated_at: manager.updated_at || null,
+  };
+}
+
+async function readManagerByEmail(email) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) return null;
+
+  await ensureManagersTable();
+
+  try {
+    const manager = await db('managers').whereRaw('LOWER(gmail) = ?', [normalizedEmail]).first();
+    if (manager) {
+      return manager;
+    }
+  } catch (error) {
+    // ignore DB lookup failures and fall back below
   }
 
   try {
-    const manager = await db('managers').where('is_primary', true).first();
-    return manager || PRIMARY_MANAGER;
+    const manager = await readManagerStore();
+    if (manager && String(manager.gmail || '').trim().toLowerCase() === normalizedEmail) {
+      return manager;
+    }
   } catch (error) {
-    return PRIMARY_MANAGER;
+    // ignore file lookup failures
   }
+
+  return null;
+}
+
+async function readManagers() {
+  await ensureManagersTable();
+
+  try {
+    return await db('managers').orderBy([
+      { column: 'is_primary', order: 'desc' },
+      { column: 'created_at', order: 'asc' },
+    ]);
+  } catch (error) {
+    const primaryManager = await readPrimaryManager();
+    return primaryManager ? [primaryManager] : [];
+  }
+}
+
+async function createManagerAccount({ name, gmail, password }) {
+  await ensureManagersTable();
+
+  const createdAt = new Date().toISOString();
+  const tempPassword = String(password || '').trim() || crypto.randomBytes(6).toString('base64url');
+
+  const [createdId] = await db('managers').insert({
+    name: String(name || '').trim(),
+    gmail: String(gmail || '').trim().toLowerCase(),
+    password: tempPassword,
+    is_primary: false,
+    is_active: true,
+    whatsapp_alerts_enabled: true,
+    created_at: db.fn.now(),
+    updated_at: db.fn.now(),
+  });
+
+  return {
+    id: createdId,
+    name: String(name || '').trim(),
+    gmail: String(gmail || '').trim().toLowerCase(),
+    password: tempPassword,
+    is_primary: false,
+    is_active: true,
+    whatsapp_alerts_enabled: true,
+    created_at: createdAt,
+    updated_at: createdAt,
+  };
+}
+
+function generateTemporaryPassword() {
+  return crypto.randomBytes(9).toString('base64url');
+}
+
+async function sendManagerWelcomeEmail(email, name, tempPassword) {
+  const transporter = makeTransporter();
+  const loginUrl = `${process.env.APP_URL || 'http://localhost:5173'}/?view=manager`;
+  const subject = 'Your Fast Forward India manager login';
+  const text = `Hello ${name},\n\nYour manager account has been created.\n\nLogin link: ${loginUrl}\nTemporary password: ${tempPassword}\n\nUse your Gmail address and the temporary password above to sign in. After logging in, please update the password if needed.`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111">
+      <h2 style="margin:0 0 12px">Your Fast Forward India manager login</h2>
+      <p>Hello ${name},</p>
+      <p>Your manager account has been created.</p>
+      <p><a href="${loginUrl}" style="display:inline-block;background:#0f766e;color:#fff;text-decoration:none;padding:10px 16px;border-radius:6px;font-weight:700">Open manager login</a></p>
+      <p><strong>Temporary password:</strong> ${tempPassword}</p>
+      <p>Use your Gmail address and the temporary password above to sign in. Please change it after your first login if your workflow requires it.</p>
+    </div>
+  `;
+
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from: process.env.FROM_EMAIL || process.env.SMTP_USER || 'no-reply@fastforwardindia.org',
+        to: email,
+        subject,
+        text,
+        html,
+        replyTo: process.env.FROM_EMAIL || process.env.SMTP_USER || 'no-reply@fastforwardindia.org',
+      });
+      return { sent: true };
+    } catch (error) {
+      console.warn('Failed to send manager welcome email:', error && error.message);
+    }
+  }
+
+  console.log('Manager welcome email fallback for', email, { loginUrl, tempPassword });
+  return { sent: false, tempPassword };
 }
 
 function normalizeDonor(row, index) {
@@ -141,13 +349,132 @@ app.get('/api/manager', async (_request, response) => {
   try {
     const manager = await readPrimaryManager();
 
-    response.json({
-      id: manager.id,
-      name: manager.name,
-      gmail: manager.gmail,
-    });
+    response.json(serializeManager(manager));
   } catch (error) {
     response.status(500).json({ message: 'Failed to load manager account.' });
+  }
+});
+
+app.get('/api/managers', async (_request, response) => {
+  try {
+    const managers = await readManagers();
+    response.json(managers.map(serializeManager));
+  } catch (error) {
+    response.status(500).json({ message: 'Failed to load manager accounts.' });
+  }
+});
+
+app.post('/api/managers', async (request, response) => {
+  try {
+    const name = String(request.body?.name || '').trim();
+    const gmail = String(request.body?.gmail || request.body?.email || '').trim().toLowerCase();
+    const providedPassword = String(request.body?.password || '').trim();
+
+    if (!name) {
+      return response.status(400).json({ message: 'name is required.' });
+    }
+
+    if (!gmail) {
+      return response.status(400).json({ message: 'gmail is required.' });
+    }
+
+    if (!/\S+@\S+\.\S+/.test(gmail)) {
+      return response.status(400).json({ message: 'gmail must be a valid email address.' });
+    }
+
+    const existingManager = await readManagerByEmail(gmail);
+    if (existingManager) {
+      return response.status(409).json({ message: 'A manager with that gmail already exists.' });
+    }
+
+    const tempPassword = providedPassword || generateTemporaryPassword();
+    const createdManager = await createManagerAccount({ name, gmail, password: tempPassword });
+    const mailResult = await sendManagerWelcomeEmail(gmail, name, tempPassword);
+
+    const payload = serializeManager(createdManager);
+    payload.message = 'Manager account created successfully.';
+    if (process.env.SHOW_RESET_TOKEN === 'true' || !mailResult.sent) {
+      payload.tempPassword = tempPassword;
+      payload.loginUrl = `${process.env.APP_URL || 'http://localhost:5173'}/?view=manager`;
+    }
+
+    response.status(201).json(payload);
+  } catch (error) {
+    response.status(500).json({ message: 'Failed to create manager account.' });
+  }
+});
+
+app.post('/api/managers/:id/deactivate', async (request, response) => {
+  try {
+    await ensureManagersTable();
+    const managerId = Number(request.params.id);
+
+    if (!Number.isInteger(managerId) || managerId <= 0) {
+      return response.status(400).json({ message: 'manager id is required.' });
+    }
+
+    const manager = await db('managers').where('id', managerId).first();
+    if (!manager) {
+      return response.status(404).json({ message: 'Manager not found.' });
+    }
+
+    if (manager.is_primary) {
+      return response.status(400).json({ message: 'Primary manager cannot be deactivated.' });
+    }
+
+    await db('managers').where('id', managerId).update({ is_active: false, updated_at: db.fn.now() });
+    const updatedManager = await db('managers').where('id', managerId).first();
+
+    return response.json(serializeManager(updatedManager));
+  } catch (error) {
+    return response.status(500).json({ message: 'Failed to deactivate manager account.' });
+  }
+});
+
+app.post('/api/managers/:id/activate', async (request, response) => {
+  try {
+    await ensureManagersTable();
+    const managerId = Number(request.params.id);
+
+    if (!Number.isInteger(managerId) || managerId <= 0) {
+      return response.status(400).json({ message: 'manager id is required.' });
+    }
+
+    const manager = await db('managers').where('id', managerId).first();
+    if (!manager) {
+      return response.status(404).json({ message: 'Manager not found.' });
+    }
+
+    await db('managers').where('id', managerId).update({ is_active: true, updated_at: db.fn.now() });
+    const updatedManager = await db('managers').where('id', managerId).first();
+
+    return response.json(serializeManager(updatedManager));
+  } catch (error) {
+    return response.status(500).json({ message: 'Failed to activate manager account.' });
+  }
+});
+
+app.post('/api/managers/:id/alerts', async (request, response) => {
+  try {
+    await ensureManagersTable();
+    const managerId = Number(request.params.id);
+    const enabled = Boolean(request.body?.enabled);
+
+    if (!Number.isInteger(managerId) || managerId <= 0) {
+      return response.status(400).json({ message: 'manager id is required.' });
+    }
+
+    const manager = await db('managers').where('id', managerId).first();
+    if (!manager) {
+      return response.status(404).json({ message: 'Manager not found.' });
+    }
+
+    await db('managers').update({ whatsapp_alerts_enabled: enabled, updated_at: db.fn.now() });
+    const updatedManager = await db('managers').where('id', managerId).first();
+
+    return response.json(serializeManager(updatedManager));
+  } catch (error) {
+    return response.status(500).json({ message: 'Failed to update WhatsApp alert setting.' });
   }
 });
 
@@ -171,17 +498,21 @@ app.post('/api/manager/login', async (request, response) => {
       return response.status(400).json({ message: 'password is required.' });
     }
 
-    const manager = await readPrimaryManager();
+    const manager = await readManagerByEmail(email);
 
-    if (!manager || !manager.is_primary || String((manager.gmail || '')).toLowerCase() !== email || String(manager.password || '') !== password) {
-      return response.status(401).json({ message: 'Only the seeded manager email and password can sign in.' });
+    if (!manager || String(manager.password || '') !== password) {
+      return response.status(401).json({ message: 'Invalid manager email or password.' });
     }
 
-    response.json({
-      id: manager.id,
-      name: manager.name,
-      gmail: manager.gmail,
-    });
+    if (!manager.is_primary && !isActiveFlag(manager.is_active)) {
+      return response.status(423).json({
+        message: 'Your account is deactivated. Activate it to continue.',
+        inactive: true,
+        manager: serializeManager(manager),
+      });
+    }
+
+    response.json(serializeManager(manager));
   } catch (error) {
     response.status(500).json({ message: 'Manager login failed.' });
   }
@@ -253,8 +584,8 @@ app.post('/api/manager/forgot/request', async (request, response) => {
     if (!email) return response.status(400).json({ message: 'email is required.' });
     if (!/\S+@\S+\.\S+/.test(email)) return response.status(400).json({ message: 'email must be a valid email address.' });
 
-    const manager = await readPrimaryManager();
-    if (!manager || String((manager.gmail || '')).toLowerCase() !== email) {
+    const manager = await readManagerByEmail(email);
+    if (!manager) {
       // Generic response to avoid account enumeration
       return response.json({ message: 'If the email matches the seeded manager, a reset link has been sent.' });
     }

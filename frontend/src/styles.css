@@ -1006,10 +1006,38 @@ tbody td { padding: 0.8rem 1.1rem; font-size: 0.85rem; vertical-align: middle; }
 /* ── Manager Login ───────────────────────────────── */
 .manager-page {
   width: 100%;
-  max-width: 760px;
+  max-width: 1120px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
+  gap: 1rem;
+}
+
+.manager-dashboard-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.manager-dashboard-hero-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-top: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.manager-dashboard-hero-meta strong {
+  display: block;
+  margin-top: 0.25rem;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 1rem;
+}
+
+.manager-dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr;
   gap: 1rem;
 }
 
@@ -1051,6 +1079,19 @@ tbody td { padding: 0.8rem 1.1rem; font-size: 0.85rem; vertical-align: middle; }
   padding: 1.25rem;
 }
 
+.manager-card-action {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.manager-form-page {
+  max-width: 760px;
+}
+
+.manager-actions-right {
+  justify-content: flex-end;
+}
+
 .manager-form-grid {
   display: grid;
   gap: 0.9rem;
@@ -1069,6 +1110,264 @@ tbody td { padding: 0.8rem 1.1rem; font-size: 0.85rem; vertical-align: middle; }
   color: var(--red);
   font-size: 0.85rem;
   font-weight: 600;
+}
+
+.manager-info {
+  padding: 0.8rem 0.95rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(37,99,235,0.18);
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.manager-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin-bottom: 0.95rem;
+}
+
+.manager-self-service-note {
+  margin-bottom: 0.95rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  font-size: 0.82rem;
+  color: var(--text-2);
+}
+
+.manager-alert-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1rem;
+  margin-bottom: 0.95rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+}
+
+.manager-alert-switch-row strong {
+  display: block;
+  margin-top: 0.25rem;
+  font-family: 'Space Grotesk', sans-serif;
+}
+
+.manager-alert-toggle {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 0.42rem 0.8rem;
+  cursor: pointer;
+}
+
+.manager-alert-toggle.on {
+  background: var(--amber-soft);
+  color: var(--amber);
+  border-color: rgba(217,119,6,0.18);
+}
+
+.manager-alert-toggle.off {
+  background: var(--green-soft);
+  color: var(--green);
+  border-color: rgba(14,159,110,0.18);
+}
+
+.manager-account-badge.active {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+/* Toggle switch for global WhatsApp alerts */
+.global-alert-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-left: 1rem;
+}
+
+.switch {
+  position: relative;
+  width: 52px;
+  height: 28px;
+  display: inline-block;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #ccc;
+  transition: 0.2s;
+  border-radius: 999px;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.06);
+}
+
+.slider:before {
+  position: absolute;
+  content: '';
+  height: 22px;
+  width: 22px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  transition: 0.2s;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+}
+
+.switch input:checked + .slider {
+  background-color: var(--amber-soft);
+}
+
+.switch input:checked + .slider:before {
+  transform: translateX(24px);
+}
+
+.switch.disabled {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.toggle-label {
+  font-size: 0.86rem;
+  color: var(--text-2);
+  font-weight: 700;
+}
+
+/* Logout button styling for manager dashboard */
+.logout-btn {
+  padding: 0.6rem 0.9rem;
+  font-size: 0.98rem;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 8px;
+}
+
+.logout-arrow {
+  color: #ef4444; /* red-500 */
+  font-weight: 900;
+  font-size: 1.06rem;
+  transform: translateY(-1px);
+}
+
+.manager-account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.manager-account-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+}
+
+.manager-account-item.inactive {
+  opacity: 0.8;
+  background: linear-gradient(180deg, var(--bg-3), rgba(217,119,6,0.04));
+}
+
+.manager-account-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-left: auto;
+}
+
+.manager-account-item strong {
+  display: block;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 0.95rem;
+}
+
+.manager-account-item span {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--text-3);
+}
+
+.manager-account-badge {
+  flex-shrink: 0;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.manager-account-badge.primary {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.manager-account-badge.inactive {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.manager-deactivate-btn {
+  border: 1px solid rgba(200,25,45,0.18);
+  background: rgba(200,25,45,0.08);
+  color: var(--red);
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.28rem 0.7rem;
+  cursor: pointer;
+}
+
+.manager-deactivate-btn:hover {
+  background: var(--red);
+  color: #fff;
+}
+
+.manager-activation-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.95rem 1rem;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(217,119,6,0.18);
+  background: var(--amber-soft);
+  color: var(--text);
+}
+
+.manager-activation-prompt strong {
+  display: block;
+  font-family: 'Space Grotesk', sans-serif;
+  margin-bottom: 0.2rem;
+}
+
+.manager-activation-prompt span {
+  color: var(--text-2);
+  font-size: 0.85rem;
 }
 
 .manager-session-grid {
@@ -1113,6 +1412,8 @@ tbody td { padding: 0.8rem 1.1rem; font-size: 0.85rem; vertical-align: middle; }
   :root { --sidebar-w: 200px; }
   .stats-row { grid-template-columns: repeat(2, 1fr); }
   .dashboard-grid { grid-template-columns: 1fr; }
+  .manager-dashboard-grid { grid-template-columns: 1fr; }
+  .manager-summary-grid { grid-template-columns: 1fr; }
   .form-row { grid-template-columns: 1fr; }
   .blood-grid { grid-template-columns: repeat(4, 1fr); }
 }
@@ -1121,4 +1422,6 @@ tbody td { padding: 0.8rem 1.1rem; font-size: 0.85rem; vertical-align: middle; }
   .app { flex-direction: column; }
   .sidebar { width: 100%; flex-direction: row; overflow-x: auto; padding: 0.5rem; }
   .stats-row { grid-template-columns: repeat(2, 1fr); }
+  .manager-account-item { align-items: flex-start; flex-direction: column; }
+  .manager-dashboard-hero-meta { align-items: flex-start; }
 }
