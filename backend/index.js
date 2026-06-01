@@ -3,6 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const fs = require('fs/promises');
 const path = require('path');
+const crypto = require('crypto');
 const db = require('./db/knex');
 
 const app = express();
@@ -70,6 +71,207 @@ function isAlertsEnabledFlag(value) {
   return value === true || value === 1 || value === '1';
 }
 
+function getMetaWhatsAppConfig() {
+  return {
+    accessToken: String(process.env.META_WHATSAPP_ACCESS_TOKEN || '').trim(),
+    phoneNumberId: String(process.env.META_WHATSAPP_PHONE_NUMBER_ID || '').trim(),
+    apiVersion: String(process.env.META_WHATSAPP_API_VERSION || 'v22.0').trim(),
+    verifyToken: String(process.env.META_WHATSAPP_VERIFY_TOKEN || '').trim(),
+    templateName: String(process.env.META_WHATSAPP_TEMPLATE_NAME || 'hello_world').trim(),
+    templateLanguageCode: String(process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || 'en_US').trim(),
+  };
+}
+
+function getMissingMetaWhatsAppConfig(config) {
+  const missing = [];
+  if (!config.accessToken) missing.push('META_WHATSAPP_ACCESS_TOKEN');
+  if (!config.phoneNumberId) missing.push('META_WHATSAPP_PHONE_NUMBER_ID');
+  if (!config.apiVersion) missing.push('META_WHATSAPP_API_VERSION');
+  if (!config.verifyToken) missing.push('META_WHATSAPP_VERIFY_TOKEN');
+  return missing;
+}
+
+function normalizePhoneNumber(value) {
+  let digits = String(value || '').replace(/\D+/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.length === 10) digits = `91${digits}`;
+  return digits;
+}
+
+function toJsonText(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    try {
+      JSON.parse(value);
+      return value;
+    } catch {
+      return JSON.stringify({ raw: value });
+    }
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return JSON.stringify({ raw: String(value) });
+  }
+}
+
+function buildDonorAlertMessage(donor) {
+  return [
+    `Hello ${donor.name || 'Donor'},`,
+    '',
+    'Fast Forward India needs your support for an urgent blood donation request.',
+    `Blood group needed: ${donor.blood || 'Not specified'}`,
+    'Please reply YES if you are available to donate.',
+    '',
+    '- Fast Forward India',
+  ].join('\n');
+}
+
+function buildTemplateComponents(templateParams = []) {
+  if (!Array.isArray(templateParams) || templateParams.length === 0) {
+    return undefined;
+  }
+
+  return [{
+    type: 'body',
+    parameters: templateParams.map(value => ({
+      type: 'text',
+      text: String(value ?? ''),
+    })),
+  }];
+}
+
+async function areWhatsAppAlertsEnabled() {
+  try {
+    await ensureManagersTable();
+    const enabledManager = await db('managers').where('whatsapp_alerts_enabled', true).first();
+    return Boolean(enabledManager);
+  } catch (error) {
+    return true;
+  }
+}
+
+async function sendMetaWhatsAppTemplateMessage({ to, templateParams = [] }) {
+  const config = getMetaWhatsAppConfig();
+  const missing = getMissingMetaWhatsAppConfig(config).filter(name => name !== 'META_WHATSAPP_VERIFY_TOKEN');
+  if (missing.length) {
+    return {
+      ok: false,
+      status: 500,
+      error: `Missing required Meta WhatsApp config: ${missing.join(', ')}`,
+    };
+  }
+
+  if (typeof fetch !== 'function') {
+    return {
+      ok: false,
+      status: 500,
+      error: 'Global fetch is not available in this Node runtime.',
+    };
+  }
+
+  const endpoint = `https://graph.facebook.com/${config.apiVersion}/${config.phoneNumberId}/messages`;
+  const buildTemplatePayload = (params) => {
+    const template = {
+      name: config.templateName,
+      language: { code: config.templateLanguageCode },
+    };
+
+    const components = buildTemplateComponents(params);
+    if (components) {
+      template.components = components;
+    }
+
+    return {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'template',
+      template,
+    };
+  };
+
+  const sendTemplateRequest = async (params) => {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify(buildTemplatePayload(params)),
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    return { response, payload };
+  };
+
+  try {
+    let { response, payload } = await sendTemplateRequest(templateParams);
+
+    // Some templates (for example hello_world) do not accept body parameters.
+    // If components were provided and Meta rejects parameter shape, retry once without components.
+    if (!response.ok && Array.isArray(templateParams) && templateParams.length > 0) {
+      const detail = String(payload?.error?.error_data?.details || '').toLowerCase();
+      const shouldRetryWithoutComponents = detail.includes('parameter') || detail.includes('component');
+      if (shouldRetryWithoutComponents) {
+        const retry = await sendTemplateRequest([]);
+        response = retry.response;
+        payload = retry.payload;
+      }
+    }
+
+    if (!response.ok) {
+      const metaCode = payload?.error?.code;
+      const recipientNotAllowed = metaCode === 131030;
+      const baseError = payload?.error?.message || 'Meta WhatsApp API request failed.';
+
+      return {
+        ok: false,
+        status: response.status,
+        error: recipientNotAllowed
+          ? `${baseError} Add the recipient phone number to the allowed recipients list in Meta WhatsApp test settings, or switch the app/account to live messaging with an approved template.`
+          : baseError,
+        payload,
+      };
+    }
+
+    return {
+      ok: true,
+      status: response.status,
+      payload,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 502,
+      error: `Meta WhatsApp request failed: ${error.message}`,
+    };
+  }
+}
+
+function summarizeMetaWebhook(payload) {
+  const entries = Array.isArray(payload?.entry) ? payload.entry : [];
+  let messageCount = 0;
+  let statusCount = 0;
+
+  for (const entry of entries) {
+    const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+    for (const change of changes) {
+      const value = change?.value || {};
+      if (Array.isArray(value.messages)) messageCount += value.messages.length;
+      if (Array.isArray(value.statuses)) statusCount += value.statuses.length;
+    }
+  }
+
+  return {
+    object: payload?.object || null,
+    entries: entries.length,
+    messages: messageCount,
+    statuses: statusCount,
+  };
+}
+
 async function ensureManagersTable() {
   const hasTable = await db.schema.hasTable('managers');
 
@@ -133,6 +335,28 @@ async function ensureManagersTable() {
         updated_at: db.fn.now(),
       });
     }
+  }
+}
+
+async function ensureWhatsAppEventsTable() {
+  try {
+    const has = await db.schema.hasTable('whatsapp_events');
+    if (!has) {
+      await db.schema.createTable('whatsapp_events', function(table) {
+        table.increments('id').primary();
+        table.string('student_name', 200).nullable();
+        table.string('student_phone', 32).nullable();
+        table.string('status', 32).notNullable().defaultTo('pending');
+        table.string('message_id', 255).nullable();
+        table.integer('attempt_count').notNullable().defaultTo(0);
+        table.text('last_error').nullable();
+        table.json('meta').nullable();
+        table.timestamp('created_at').defaultTo(db.fn.now());
+        table.timestamp('updated_at').defaultTo(db.fn.now());
+      });
+    }
+  } catch (err) {
+    console.warn('Failed to ensure whatsapp_events table:', err && err.message);
   }
 }
 
@@ -345,6 +569,230 @@ app.delete('/api/donors', async (_request, response) => {
   }
 });
 
+app.post('/api/whatsapp/alerts/send', async (request, response) => {
+  try {
+    const donor = request.body?.donor || null;
+    const templateParams = Array.isArray(request.body?.templateParams)
+      ? request.body.templateParams.map(value => String(value ?? ''))
+      : [];
+
+    if (!donor || typeof donor !== 'object') {
+      return response.status(400).json({ message: 'donor payload is required.' });
+    }
+
+    const phone = normalizePhoneNumber(donor.mobile);
+    if (!phone) {
+      return response.status(400).json({ message: 'A valid donor mobile number is required.' });
+    }
+
+    const alertsEnabled = await areWhatsAppAlertsEnabled();
+    if (!alertsEnabled) {
+      return response.status(409).json({ message: 'WhatsApp alerts are disabled by manager settings.' });
+    }
+
+    const result = await sendMetaWhatsAppTemplateMessage({
+      to: phone,
+      templateParams,
+    });
+
+    // persist event (create record)
+    try {
+      await ensureWhatsAppEventsTable();
+      const messageId = result.payload?.messages?.[0]?.id || null;
+      const status = result.ok ? 'sent' : 'failed';
+      const event = {
+        student_name: donor.name || null,
+        student_phone: phone || null,
+        status,
+        message_id: messageId,
+        attempt_count: 1,
+        last_error: result.ok ? null : (result.error || null),
+        meta: toJsonText(result.payload),
+      };
+
+      const [insertedId] = await db('whatsapp_events').insert(event);
+
+      if (!result.ok) {
+        return response.status(result.status || 500).json({
+          message: result.error || 'Failed to send WhatsApp alert via Meta API.',
+          meta: result.payload || null,
+          eventId: insertedId,
+        });
+      }
+
+      // mark donor as notified in sheet storage (best-effort)
+      try {
+        const store = await readSheetStore();
+        const nextDonors = Array.isArray(store.donors)
+          ? store.donors.map(currentDonor => {
+              if (Number(currentDonor.id) === Number(donor.id)) {
+                return { ...currentDonor, notified: true };
+              }
+
+              const currentPhone = normalizePhoneNumber(currentDonor.mobile);
+              if (!donor.id && currentPhone && currentPhone === phone) {
+                return { ...currentDonor, notified: true };
+              }
+
+              return currentDonor;
+            })
+          : [];
+        await writeSheetStore({ ...store, donors: nextDonors });
+      } catch (err) {
+        // ignore
+      }
+
+      return response.json({
+        message: `WhatsApp alert sent to ${donor.name || donor.mobile || 'donor'}.`,
+        messageId: messageId,
+        meta: result.payload,
+        eventId: insertedId,
+      });
+    } catch (err) {
+      return response.status(500).json({ message: 'Failed to persist WhatsApp event.' });
+    }
+  } catch (error) {
+    return response.status(500).json({ message: 'Failed to send WhatsApp alert.' });
+  }
+});
+
+// Admin: whatsapp status
+app.get('/api/admin/whatsapp/status', async (_req, res) => {
+  const config = getMetaWhatsAppConfig();
+  const missing = getMissingMetaWhatsAppConfig(config).filter(k => k !== 'META_WHATSAPP_VERIFY_TOKEN');
+  const hasConfig = missing.length === 0;
+
+  try {
+    await ensureWhatsAppEventsTable();
+    const lastSent = await db('whatsapp_events').where('status', 'sent').orderBy('created_at', 'desc').first();
+    const failedCount = await db('whatsapp_events').where('status', 'failed').count('id as c').first();
+
+    return res.json({
+      ok: true,
+      hasConfig,
+      missing,
+      lastSent: lastSent || null,
+      failed: Number(failedCount?.c || 0),
+    });
+  } catch (err) {
+    return res.json({ ok: false, error: err.message });
+  }
+});
+
+// Admin: list events
+app.get('/api/admin/whatsapp/events', async (_req, res) => {
+  try {
+    await ensureWhatsAppEventsTable();
+    const events = await db('whatsapp_events').orderBy('created_at', 'desc').limit(200);
+    return res.json({ ok: true, events });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Admin: retry a failed event
+app.post('/api/admin/whatsapp/events/:id/retry', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ message: 'id is required' });
+
+    await ensureWhatsAppEventsTable();
+    const ev = await db('whatsapp_events').where('id', id).first();
+    if (!ev) return res.status(404).json({ message: 'Event not found' });
+
+    const phone = normalizePhoneNumber(ev.student_phone);
+    if (!phone) return res.status(400).json({ message: 'Invalid phone on event' });
+
+    const result = await sendMetaWhatsAppTemplateMessage({ to: phone });
+
+    const updates = {
+      attempt_count: Number(ev.attempt_count || 0) + 1,
+      updated_at: db.fn.now(),
+    };
+
+    if (result.ok) {
+      updates.status = 'sent';
+      updates.message_id = result.payload?.messages?.[0]?.id || ev.message_id;
+      updates.last_error = null;
+      updates.meta = toJsonText(result.payload);
+    } else {
+      updates.status = 'failed';
+      updates.last_error = result.error || null;
+      updates.meta = toJsonText(result.payload);
+    }
+
+    await db('whatsapp_events').where('id', id).update(updates);
+
+    return res.json({ ok: result.ok, meta: result.payload || null });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get('/api/meta/whatsapp/webhook', (request, response) => {
+  const mode = String(request.query['hub.mode'] || '').trim();
+  const token = String(request.query['hub.verify_token'] || '').trim();
+  const challenge = String(request.query['hub.challenge'] || '').trim();
+
+  const config = getMetaWhatsAppConfig();
+  if (!config.verifyToken) {
+    return response.status(500).send('META_WHATSAPP_VERIFY_TOKEN is not configured.');
+  }
+
+  if (mode === 'subscribe' && token === config.verifyToken) {
+    return response.status(200).send(challenge || 'OK');
+  }
+
+  return response.status(403).send('Invalid webhook verification token.');
+});
+
+app.post('/api/meta/whatsapp/webhook', (request, response) => {
+  const body = request.body || {};
+  const summary = summarizeMetaWebhook(body);
+  console.log('Meta WhatsApp webhook received:', JSON.stringify(summary));
+
+  // update events where possible
+  try {
+    const entries = Array.isArray(body.entry) ? body.entry : [];
+    (async () => {
+      await ensureWhatsAppEventsTable();
+      for (const entry of entries) {
+        const changes = Array.isArray(entry.changes) ? entry.changes : [];
+        for (const change of changes) {
+          const value = change.value || {};
+          if (Array.isArray(value.statuses)) {
+            for (const st of value.statuses) {
+              const messageId = st?.id || st?.message_id || null;
+              const status = st?.status || null;
+              if (messageId && status) {
+                // map statuses to our statuses
+                const map = { sent: 'sent', delivered: 'sent', read: 'sent', failed: 'failed' };
+                const newStatus = map[status] || status;
+                await db('whatsapp_events').where('message_id', messageId).update({ status: newStatus, updated_at: db.fn.now(), meta: toJsonText(st) });
+              }
+            }
+          }
+
+          if (Array.isArray(value.messages)) {
+            for (const msg of value.messages) {
+              const from = msg?.from || null;
+              const msgId = msg?.id || null;
+              if (msgId && from) {
+                // create inbound record for tracking
+                await db('whatsapp_events').insert({ student_name: null, student_phone: from, status: 'received', message_id: msgId, attempt_count: 0, meta: toJsonText(msg) }).catch(() => {});
+              }
+            }
+          }
+        }
+      }
+    })();
+  } catch (err) {
+    console.warn('Failed to update whatsapp_events from webhook:', err && err.message);
+  }
+
+  return response.status(200).send('EVENT_RECEIVED');
+});
+
 app.get('/api/manager', async (_request, response) => {
   try {
     const manager = await readPrimaryManager();
@@ -518,7 +966,6 @@ app.post('/api/manager/login', async (request, response) => {
   }
 });
 
-const crypto = require('crypto');
 let nodemailer;
 try { nodemailer = require('nodemailer'); } catch (e) { nodemailer = null; }
 

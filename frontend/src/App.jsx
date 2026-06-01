@@ -310,6 +310,27 @@ async function updateGlobalWhatsAppAlerts(managerId, enabled) {
   return data;
 }
 
+async function sendDonorWhatsAppAlert(donor, message) {
+  const templateParams = [
+    donor?.name || 'Donor',
+    donor?.blood || 'Unknown',
+    donor?.programme || 'Student',
+  ];
+
+  const response = await fetch('/api/whatsapp/alerts/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ donor, message, templateParams }),
+  });
+
+  const data = await readResponseData(response);
+  if (!response.ok) {
+    throw new Error(data.message || 'Failed to send WhatsApp alert.');
+  }
+
+  return data;
+}
+
 async function sendBrowserNotification(title, body) {
   if (typeof window === 'undefined' || !('Notification' in window)) return false;
 
@@ -355,6 +376,106 @@ function StatCard({ value, label, icon, color, delta, deltaType, onSeeMore }) {
           See more ▶
         </button>
       )}
+    </div>
+  );
+}
+
+function WhatsAppAdminPanel({ open, onClose }) {
+  const [status, setStatus] = useState(null);
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    console.log('WhatsAppAdminPanel open=', open);
+  }, [open]);
+
+  async function fetchStatus() {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/admin/whatsapp/status');
+      const data = await res.json();
+      setStatus(data);
+    } catch (err) {
+      setStatus({ ok: false, error: err.message });
+    } finally { setLoading(false); }
+  }
+
+  async function fetchEvents() {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/admin/whatsapp/events');
+      const data = await res.json();
+      setEvents(data.events || []);
+    } catch (err) {
+      setEvents([]);
+    } finally { setLoading(false); }
+  }
+
+  async function retryEvent(id) {
+    try {
+      const res = await fetch(`/api/admin/whatsapp/events/${id}/retry`, { method: 'POST' });
+      const data = await res.json();
+      await fetchEvents();
+      await fetchStatus();
+      alert(data.ok ? 'Retry succeeded' : `Retry failed: ${data.error || 'unknown'}`);
+    } catch (err) {
+      alert('Retry request failed: ' + err.message);
+    }
+  }
+
+  useEffect(() => { if (open) { fetchStatus(); fetchEvents(); } }, [open]);
+
+  if (!open) return null;
+
+  return (
+    <div className="sheet-modal-backdrop" onClick={onClose}>
+      <div className="sheet-modal card" onClick={e => e.stopPropagation()} style={{ width: '760px', maxHeight: '70vh', overflow: 'auto' }}>
+        <div className="card-header">
+          <div>
+            <h3>WhatsApp Admin</h3>
+            <p style={{ margin: 0 }}>Manage WhatsApp event health and retries</p>
+          </div>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button className="action-btn" onClick={() => { fetchStatus(); fetchEvents(); }}>Refresh</button>
+            <button className="action-btn" onClick={onClose}>Close</button>
+          </div>
+        </div>
+        <div style={{ padding: '1rem' }}>
+          {loading && <div>Loading…</div>}
+          {status && (
+            <div style={{ marginBottom: '1rem' }}>
+              <strong>Config OK:</strong> {String(status.hasConfig)}<br />
+              <strong>Missing:</strong> {(status.missing || []).join(', ')}<br />
+              <strong>Failed events:</strong> {status.failed || 0}
+            </div>
+          )}
+
+          <h4>Recent Events</h4>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr><th>Id</th><th>Phone</th><th>Name</th><th>Status</th><th>MsgId</th><th>Attempts</th><th>Action</th></tr>
+            </thead>
+            <tbody>
+              {events.map(ev => (
+                <tr key={ev.id} style={{ borderTop: '1px solid #eee' }}>
+                  <td>{ev.id}</td>
+                  <td style={{ fontFamily: 'monospace' }}>{ev.student_phone}</td>
+                  <td>{ev.student_name}</td>
+                  <td>{ev.status}</td>
+                  <td style={{ fontFamily: 'monospace' }}>{ev.message_id || '—'}</td>
+                  <td>{ev.attempt_count}</td>
+                  <td>
+                    {ev.student_phone
+                      ? <button className="action-btn" onClick={() => retryEvent(ev.id)}>{ev.status === 'failed' ? 'Retry' : 'Send Again'}</button>
+                      : '—'}
+                  </td>
+                </tr>
+              ))}
+              {events.length === 0 && (<tr><td colSpan={7} style={{ textAlign: 'center' }}>No events</td></tr>)}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
@@ -887,10 +1008,21 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
       return;
     }
 
-    setAlertMessage({ type: '', text: '' });
-    setDonors(currentDonors => currentDonors.map(donor => (donor.id === donorId ? { ...donor, notified: true } : donor)));
-    setAlertMessage({ type: 'success', text: `WhatsApp alert sent to ${targetDonor.name || 'the selected donor'}.` });
-    await sendBrowserNotification('WhatsApp alert sent', `${targetDonor.name || 'Donor'} has been notified.`);
+    try {
+      setAlertMessage({ type: '', text: '' });
+      const result = await sendDonorWhatsAppAlert(targetDonor);
+      setDonors(currentDonors => currentDonors.map(donor => (donor.id === donorId ? { ...donor, notified: true } : donor)));
+      setAlertMessage({
+        type: 'success',
+        text: result.message || `WhatsApp alert sent to ${targetDonor.name || 'the selected donor'}.`,
+      });
+      await sendBrowserNotification('WhatsApp alert sent', `${targetDonor.name || 'Donor'} has been notified.`);
+    } catch (error) {
+      setAlertMessage({
+        type: 'error',
+        text: error instanceof Error ? error.message : 'Failed to send WhatsApp alert.',
+      });
+    }
   };
 
   const filtered = donors.filter(d => {
@@ -1895,6 +2027,32 @@ export default function App() {
     setManagerSession(null);
   };
 
+  const [showWhatsAppAdmin, setShowWhatsAppAdmin] = useState(() => {
+    try {
+      if (typeof window === 'undefined') return false;
+      const params = new URLSearchParams(window.location.search);
+      return params.get('view') === 'whatsapp-admin';
+    } catch (e) { return false; }
+  });
+  const [whStatus, setWhStatus] = useState(null);
+  const [whEvents, setWhEvents] = useState([]);
+  useEffect(() => {
+    const handlePopState = () => setView(current => current);
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('view') === 'whatsapp-admin') {
+        // debug auto-open
+        // console.log intentionally left for local debugging
+        setShowWhatsAppAdmin(true);
+      }
+    } catch (e) {}
+  }, []);
+
   useEffect(() => {
     const handlePopState = () => setView(current => current);
     window.addEventListener('popstate', handlePopState);
@@ -1960,6 +2118,7 @@ export default function App() {
             </div>
             <button className="topbar-btn primary" onClick={() => setView('request')}>➕ New Request</button>
             <button className="topbar-btn" onClick={() => setView('donors')}>👥 Donors</button>
+            <button className="topbar-btn" onClick={() => { console.log('WhatsApp Admin button clicked'); setShowWhatsAppAdmin(true); }}>📲 WhatsApp Admin</button>
           </div>
         </header>
 
@@ -1977,6 +2136,7 @@ export default function App() {
             <ManagerAddAccountView managerSession={managerSession} onLogout={handleManagerLogout} onBackToDashboard={handleBackToDashboard} />
           )}
         </div>
+        <WhatsAppAdminPanel open={showWhatsAppAdmin} onClose={() => setShowWhatsAppAdmin(false)} />
       </div>
     </div>
   );
