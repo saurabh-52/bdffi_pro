@@ -171,7 +171,9 @@ function parseDonorsSheet(worksheet) {
       const admission = findRowValue(row, ['admission no', 'admission number', 'admission', 'roll no', 'registration no']);
       const gender = findRowValue(row, ['gender', 'sex']);
       const programme = findRowValue(row, ['programme', 'program', 'course', 'branch', 'department']);
-      const mobile = findRowValue(row, ['mobile no', 'mobile number', 'phone no', 'phone number', 'contact no', 'phone']);
+      const rawMobile = findRowValue(row, ['mobile no', 'mobile number', 'phone no', 'phone number', 'contact no', 'phone']);
+      const mobileDigits = String(rawMobile || '').replace(/\D+/g, '');
+      const mobile = mobileDigits.length > 10 ? mobileDigits.slice(-10) : mobileDigits;
       const blood = normalizeBloodGroup(findRowValue(row, ['blood group', 'blood', 'bg']));
 
       return {
@@ -310,17 +312,26 @@ async function updateGlobalWhatsAppAlerts(managerId, enabled) {
   return data;
 }
 
-async function sendDonorWhatsAppAlert(donor, message) {
-  const templateParams = [
+async function sendDonorWhatsAppAlert(donor, message, customTemplateName, customTemplateLang, customTemplateParams, requestId) {
+  const templateParams = customTemplateParams || [
     donor?.name || 'Donor',
     donor?.blood || 'Unknown',
     donor?.programme || 'Student',
   ];
 
+  const payload = {
+    donor,
+    message,
+    templateParams,
+    requestId: requestId || null,
+  };
+  if (customTemplateName) payload.templateName = customTemplateName;
+  if (customTemplateLang) payload.templateLanguageCode = customTemplateLang;
+
   const response = await fetch('/api/whatsapp/alerts/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ donor, message, templateParams }),
+    body: JSON.stringify(payload),
   });
 
   const data = await readResponseData(response);
@@ -376,6 +387,105 @@ function StatCard({ value, label, icon, color, delta, deltaType, onSeeMore }) {
           See more ▶
         </button>
       )}
+    </div>
+  );
+}
+
+function WhatsAppAlertModal({ open, onClose, donor, initialRequest, requests, onSend }) {
+  const [selectedRequest, setSelectedRequest] = useState('none');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (open) {
+      if (initialRequest) {
+        setSelectedRequest(String(initialRequest.id));
+      } else {
+        setSelectedRequest('none');
+      }
+    }
+  }, [open, initialRequest]);
+
+  if (!open || !donor) return null;
+
+  const currentRequest = selectedRequest === 'none' ? null : requests.find(r => String(r.id) === String(selectedRequest));
+
+  // Build parameters for template blood_request
+  const params = currentRequest ? [
+    donor.name || 'Donor',
+    currentRequest.blood || 'Unknown',
+    currentRequest.patient || 'Patient',
+    currentRequest.hospital || 'Hospital',
+  ] : [];
+
+  const activeTemplateName = currentRequest ? 'blood_request' : 'hello_world';
+  const activeLanguageCode = 'en_US';
+
+  const handleSend = async () => {
+    setSending(true);
+    setError('');
+    try {
+      const assocReqId = selectedRequest === 'none' ? null : Number(selectedRequest);
+      const messageDesc = currentRequest ? `Outreach for patient ${currentRequest.patient}` : 'General outreach';
+      await onSend(donor, messageDesc, activeTemplateName, activeLanguageCode, params, assocReqId);
+      onClose();
+    } catch (err) {
+      setError(err.message || 'Failed to send WhatsApp alert.');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="sheet-modal-backdrop" onClick={onClose}>
+      <div className="sheet-modal card" onClick={e => e.stopPropagation()} style={{ width: '560px', maxHeight: '85vh', overflow: 'auto' }}>
+        <div className="card-header">
+          <div>
+            <h3>Send WhatsApp Alert</h3>
+            <p style={{ margin: 0 }}>Configure and send template message to {donor.name}</p>
+          </div>
+          <button className="action-btn" onClick={onClose}>Close</button>
+        </div>
+        <div style={{ padding: '1rem', display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
+          
+          {error && <div className="manager-error">{error}</div>}
+
+          <div>
+            <strong>Donor Details:</strong>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem', marginTop: '0.4rem', fontSize: '0.85rem', background: 'var(--bg-3)', padding: '0.6rem', borderRadius: 'var(--radius-sm)' }}>
+              <div><strong>Name:</strong> {donor.name}</div>
+              <div><strong>Blood Group:</strong> {donor.blood}</div>
+              <div><strong>Phone:</strong> {donor.mobile}</div>
+              <div><strong>Programme:</strong> {donor.programme || '—'}</div>
+            </div>
+          </div>
+
+          <div className="field">
+            <label htmlFor="assoc-request" style={{ fontWeight: 600, color: 'var(--text-2)' }}>Associate with Blood Request:</label>
+            <select 
+              id="assoc-request" 
+              value={selectedRequest} 
+              onChange={e => setSelectedRequest(e.target.value)}
+            >
+              <option value="none">None (General Outreach / Hello World template)</option>
+              {requests.slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).map(r => (
+                <option key={r.id} value={r.id}>
+                  [{r.blood}] {r.patient} at {r.hospital}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="form-actions" style={{ marginTop: '0.5rem' }}>
+            <button className="btn btn-primary" onClick={handleSend} disabled={sending}>
+              {sending ? '⏳ Sending…' : '📲 Send WhatsApp Message'}
+            </button>
+            <button className="btn btn-secondary" onClick={onClose} disabled={sending}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -518,11 +628,14 @@ function getPathState() {
 }
 
 // Small request item component with expandable details showing who was notified
-function RequestItem({ request }) {
+function RequestItem({ request, donors = [], onOpenOutreachModal, cooldowns = {}, whatsappEvents = [] }) {
   const [open, setOpen] = useState(false);
 
-  // find matching notification logs for this request (match by patient name)
-  const matches = BLOOD_NOTIFICATION_LOGS.filter(l => String(l.request || '').toLowerCase().includes(String(request.patient || '').toLowerCase()));
+  // find matching database events for this request
+  const requestEvents = whatsappEvents.filter(e => Number(e.request_id) === Number(request.id));
+
+  // find matching eligible donors (exact blood group match)
+  const eligibleDonors = donors.filter(d => d.blood === request.blood && d.eligible);
 
   return (
     <div style={{ width: '100%' }}>
@@ -555,20 +668,65 @@ function RequestItem({ request }) {
 
           <div>
             <strong>Notifications sent</strong>
-            {matches.length === 0 ? (
+            {requestEvents.length === 0 ? (
               <div style={{ color: 'var(--text-3)', marginTop: '0.5rem' }}>No notification records found for this request.</div>
             ) : (
               <div style={{ marginTop: '0.5rem' }}>
-                {matches.map(m => (
-                  <div key={m.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem 0', borderBottom: '1px dashed var(--muted)' }}>
+                {requestEvents.map(e => (
+                  <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem 0', borderBottom: '1px dashed var(--border)' }}>
                     <div>
-                      <div style={{ fontWeight: 700 }}>{m.donor}</div>
-                      <div style={{ fontSize: '0.85rem', color: 'var(--text-3)' }}>{m.msg}</div>
+                      <div style={{ fontWeight: 700 }}>{e.student_name || 'Donor'} ({e.student_phone})</div>
+                      {e.response ? (
+                        <div style={{ fontSize: '0.85rem', color: 'var(--green)', fontWeight: 600 }}>
+                          Reply: {e.response}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: '0.85rem', color: 'var(--text-3)' }}>
+                          {e.status === 'failed' ? `Failed: ${e.last_error || 'Unknown error'}` : 'Awaiting reply…'}
+                        </div>
+                      )}
                     </div>
                     <div style={{ textAlign: 'right' }}>
-                      <div style={{ fontSize: '0.85rem' }}>{m.status}</div>
-                      <div style={{ fontSize: '0.75rem', color: 'var(--text-3)' }}>{m.time}</div>
+                      <div style={{ fontSize: '0.85rem' }}>
+                        <span className={`status-pill ${e.status === 'accepted' ? 'fulfilled' : e.status === 'declined' || e.status === 'failed' ? 'declined' : 'active'}`}>
+                          {e.status}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-3)', marginTop: '0.2rem' }}>
+                        {formatISTDateTime(e.created_at)}
+                      </div>
                     </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ marginTop: '0.8rem', borderTop: '1px solid var(--border)', paddingTop: '0.6rem' }}>
+            <strong style={{ fontSize: '0.82rem', color: 'var(--red)', display: 'block', marginBottom: '0.4rem' }}>
+              Eligible Donors ({eligibleDonors.length})
+            </strong>
+            {eligibleDonors.length === 0 ? (
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-3)' }}>No eligible donors found in the database.</span>
+            ) : (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.2rem' }}>
+                {eligibleDonors.map(d => (
+                  <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'var(--bg-3)', padding: '0.25rem 0.5rem', borderRadius: 'var(--radius-sm)', fontSize: '0.78rem', border: '1px solid var(--border)' }}>
+                    <span>{d.name} ({d.programme || 'Student'})</span>
+                    {cooldowns[d.id] > 0 ? (
+                      <span className="action-btn notified" style={{ padding: '0.1rem 0.4rem', fontSize: '0.68rem', borderRadius: '4px', opacity: 0.8, cursor: 'not-allowed' }}>
+                        ⏳ {cooldowns[d.id]}s
+                      </span>
+                    ) : (
+                      <button 
+                        type="button" 
+                        className="action-btn notify" 
+                        style={{ padding: '0.1rem 0.4rem', fontSize: '0.68rem', borderRadius: '4px' }}
+                        onClick={() => onOpenOutreachModal?.(d, request)}
+                      >
+                        Notify
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -581,10 +739,10 @@ function RequestItem({ request }) {
 }
 
 // ── Dashboard View ─────────────────────────────────────────
-function DashboardView({ donors, requests, onSeeAllNotifications, onSeeAllRequests }) {
+function DashboardView({ donors, requests, onSeeAllNotifications, onSeeAllRequests, onOpenOutreachModal, cooldowns = {}, whatsappEvents = [] }) {
   const eligibleCount = donors.filter(donor => donor.eligible).length;
   const bloodCounts = getBloodCounts(donors);
-  const recentBloodNotifications = BLOOD_NOTIFICATION_LOGS.slice(0, 5);
+  const recentBloodNotifications = whatsappEvents.slice(0, 5);
   const recentRequests = requests.slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 5);
 
   return (
@@ -616,7 +774,7 @@ function DashboardView({ donors, requests, onSeeAllNotifications, onSeeAllReques
             </div>
             <div className="request-list">
               {recentRequests.map(r => (
-                <RequestItem key={r.id} request={r} />
+                <RequestItem key={r.id} request={r} donors={donors} onOpenOutreachModal={onOpenOutreachModal} cooldowns={cooldowns} whatsappEvents={whatsappEvents} />
               ))}
             </div>
           </div>
@@ -646,13 +804,15 @@ function DashboardView({ donors, requests, onSeeAllNotifications, onSeeAllReques
             </button>
           </div>
           <div className="activity-feed">
-            {recentBloodNotifications.map(a => (
-              <div key={a.id} className="activity-item">
-                <div className={`activity-dot ${a.status === 'accepted' ? 'green' : a.status === 'declined' ? 'red' : a.status === 'pending' ? 'amber' : 'blue'}`} />
+            {recentBloodNotifications.map(e => (
+              <div key={e.id} className="activity-item">
+                <div className={`activity-dot ${e.status === 'accepted' ? 'green' : e.status === 'declined' || e.status === 'failed' ? 'red' : 'amber'}`} />
                 <div className="activity-text">
-                  <span>{a.donor} · {a.request}</span>
-                  <span>{a.msg}</span>
-                  <time className="activity-time">{a.time}</time>
+                  <span>{e.student_name || 'Donor'} ({e.student_phone})</span>
+                  <span>
+                    {e.response ? `Reply: ${e.response}` : (e.status === 'failed' ? `Failed: ${e.last_error || 'Unknown error'}` : 'Awaiting reply…')}
+                  </span>
+                  <time className="activity-time">{formatISTDateTime(e.created_at)}</time>
                 </div>
               </div>
             ))}
@@ -804,9 +964,10 @@ function RequestView({ donors = [], onCreateRequest }) {
 }
 
 // ── Recent Requests View ──────────────────────────────────
-function RecentRequestsView({ requests }) {
+function RecentRequestsView({ requests, donors = [], onOpenOutreachModal, cooldowns = {}, whatsappEvents = [] }) {
   const [periodFilter, setPeriodFilter] = useState('all');
   const [detailsList, setDetailsList] = useState(null);
+  
   const filteredRequests = requests.filter(request => {
     if (periodFilter === 'all') return true;
     const p = getRequestPeriod(request.createdAt);
@@ -817,14 +978,19 @@ function RecentRequestsView({ requests }) {
   // sort newest -> oldest by createdAt
   const sortedRequests = filteredRequests.slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
+  const sentEvents = whatsappEvents.filter(e => e.status === 'sent' || e.status === 'delivered' || e.status === 'read');
+  const acceptedEvents = whatsappEvents.filter(e => e.status === 'accepted');
+  const declinedEvents = whatsappEvents.filter(e => e.status === 'declined' || e.status === 'failed');
+  const pendingEvents = whatsappEvents.filter(e => e.status === 'pending');
+
   return (
     <div className="section-gap animate-in">
       <div style={{ marginBottom: '0.75rem' }}>
         <div className="stats-row" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
-          <StatCard value="18" label="Sent" icon="📤" color="blue" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='sent'))} />
-          <StatCard value="9" label="Accepted" icon="✅" color="green" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='accepted'))} />
-          <StatCard value="4" label="Declined" icon="❌" color="red" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='declined'))} />
-          <StatCard value="5" label="Awaiting" icon="⏳" color="amber" onSeeMore={() => setDetailsList(BLOOD_NOTIFICATION_LOGS.filter(l => l.status==='pending'))} />
+          <StatCard value={String(sentEvents.length)} label="Sent" icon="📤" color="blue" onSeeMore={() => setDetailsList(sentEvents)} />
+          <StatCard value={String(acceptedEvents.length)} label="Accepted" icon="✅" color="green" onSeeMore={() => setDetailsList(acceptedEvents)} />
+          <StatCard value={String(declinedEvents.length)} label="Declined" icon="❌" color="red" onSeeMore={() => setDetailsList(declinedEvents)} />
+          <StatCard value={String(pendingEvents.length)} label="Awaiting" icon="⏳" color="amber" onSeeMore={() => setDetailsList(pendingEvents)} />
         </div>
         {detailsList && (
           <div className="sheet-modal-backdrop" onClick={() => setDetailsList(null)}>
@@ -842,16 +1008,21 @@ function RecentRequestsView({ requests }) {
                 {detailsList.length === 0 ? (
                   <div style={{ color: 'var(--text-3)' }}>No records</div>
                 ) : (
-                  detailsList.map(d => (
-                    <div key={d.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.6rem 0', borderBottom: '1px dashed var(--border)' }}>
+                  detailsList.map(e => (
+                    <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.6rem 0', borderBottom: '1px dashed var(--border)' }}>
                       <div>
-                        <div style={{ fontWeight: 700 }}>{d.donor}</div>
-                        <div style={{ fontSize: '0.9rem', color: 'var(--text-3)' }}>{d.msg}</div>
-                        <div style={{ fontSize: '0.85rem', color: 'var(--text-3)' }}>{d.request}</div>
+                        <div style={{ fontWeight: 700 }}>{e.student_name || 'Donor'} ({e.student_phone})</div>
+                        <div style={{ fontSize: '0.9rem', color: 'var(--text-3)' }}>
+                          {e.response ? `Reply: ${e.response}` : (e.status === 'failed' ? `Error: ${e.last_error || 'unknown'}` : 'Awaiting response…')}
+                        </div>
                       </div>
                       <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>{d.status}</div>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--text-3)' }}>{d.time}</div>
+                        <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>
+                          <span className={`status-pill ${e.status === 'accepted' ? 'fulfilled' : e.status === 'declined' || e.status === 'failed' ? 'declined' : 'active'}`}>
+                            {e.status}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--text-3)', marginTop: '0.2rem' }}>{formatISTDateTime(e.created_at)}</div>
                       </div>
                     </div>
                   ))
@@ -881,7 +1052,7 @@ function RecentRequestsView({ requests }) {
 
         <div className="request-list">
           {sortedRequests.map(request => (
-            <RequestItem key={request.id} request={request} />
+            <RequestItem key={request.id} request={request} donors={donors} onOpenOutreachModal={onOpenOutreachModal} cooldowns={cooldowns} whatsappEvents={whatsappEvents} />
           ))}
         </div>
       </div>
@@ -890,7 +1061,7 @@ function RecentRequestsView({ requests }) {
 }
 
 // ── Donors View ────────────────────────────────────────────
-function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlertsEnabled }) {
+function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlertsEnabled, onOpenOutreachModal, cooldowns = {}, setCooldowns }) {
   const [search, setSearch] = useState('');
   const [filterBG, setFilterBG] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
@@ -1012,6 +1183,7 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
       setAlertMessage({ type: '', text: '' });
       const result = await sendDonorWhatsAppAlert(targetDonor);
       setDonors(currentDonors => currentDonors.map(donor => (donor.id === donorId ? { ...donor, notified: true } : donor)));
+      if (setCooldowns) setCooldowns(current => ({ ...current, [donorId]: 20 }));
       setAlertMessage({
         type: 'success',
         text: result.message || `WhatsApp alert sent to ${targetDonor.name || 'the selected donor'}.`,
@@ -1123,12 +1295,15 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
                   </span>
                 </td>
                 <td>
-                  {d.notified
-                    ? <span className="action-btn notified">📲 Notified</span>
-                    : <button className="action-btn notify" onClick={() => notify(d.id)} disabled={!d.eligible}>
-                        {d.eligible ? 'Send Alert' : 'Ineligible'}
-                      </button>
-                  }
+                  {cooldowns[d.id] > 0 ? (
+                    <span className="action-btn notified" style={{ opacity: 0.8, cursor: 'not-allowed' }}>
+                      ⏳ Notified ({cooldowns[d.id]}s)
+                    </span>
+                  ) : (
+                    <button className="action-btn notify" onClick={() => onOpenOutreachModal ? onOpenOutreachModal(d) : notify(d.id)} disabled={!d.eligible}>
+                      {d.eligible ? 'Send Alert' : 'Ineligible'}
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}
@@ -1187,11 +1362,9 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
 }
 
 // ── Logs View ──────────────────────────────────────────────
-function LogsView({ managerLogs }) {
-  const iconMap = { sent: '📤', accepted: '✅', declined: '❌', pending: '⏳' };
+function LogsView({ managerLogs, whatsappEvents = [] }) {
+  const iconMap = { sent: '📤', accepted: '✅', declined: '❌', pending: '⏳', failed: '❌' };
   const [logType, setLogType] = useState('blood');
-
-  const activeLogs = logType === 'blood' ? BLOOD_NOTIFICATION_LOGS : managerLogs;
 
   return (
     <div className="logs-page animate-in">
@@ -1215,23 +1388,51 @@ function LogsView({ managerLogs }) {
         </button>
       </div>
 
-      
-
       <div className="card">
         <div className="log-list">
-          {activeLogs.map(l => (
-            <div key={l.id} className="log-row">
-              <div className={`log-icon ${l.status}`}>{iconMap[l.status]}</div>
-              <div className="log-info">
-                <strong>{l.donor}</strong>
-                <span>{l.request} — {l.msg}</span>
+          {logType === 'blood' ? (
+            whatsappEvents.map(e => (
+              <div key={e.id} className="log-row">
+                <div className={`log-icon ${e.status === 'accepted' ? 'accepted' : e.status === 'declined' || e.status === 'failed' ? 'declined' : 'sent'}`}>
+                  {iconMap[e.status === 'accepted' ? 'accepted' : e.status === 'declined' || e.status === 'failed' ? 'declined' : 'sent'] || '📲'}
+                </div>
+                <div className="log-info">
+                  <strong>{e.student_name || 'Donor'} ({e.student_phone})</strong>
+                  <span>
+                    {e.response ? (
+                      <span style={{ color: 'var(--green)', fontWeight: 600 }}>Reply: {e.response}</span>
+                    ) : (
+                      e.status === 'failed' ? `Outreach failed: ${e.last_error || 'unknown error'}` : 'Awaiting donor reply'
+                    )}
+                  </span>
+                </div>
+                <span className={`status-pill ${e.status === 'accepted' ? 'fulfilled' : e.status === 'declined' || e.status === 'failed' ? 'declined' : 'active'}`} style={{ fontSize: '0.7rem' }}>
+                  {e.status}
+                </span>
+                <span className="log-time">{formatISTDateTime(e.created_at)}</span>
               </div>
-              <span className={`status-pill ${l.status === 'accepted' ? 'fulfilled' : l.status === 'declined' ? 'pending' : 'active'}`} style={{ fontSize: '0.7rem' }}>
-                {l.status}
-              </span>
-              <span className="log-time">{l.time}</span>
-            </div>
-          ))}
+            ))
+          ) : (
+            managerLogs.map(l => (
+              <div key={l.id} className="log-row">
+                <div className={`log-icon ${l.status}`}>{iconMap[l.status] || '📲'}</div>
+                <div className="log-info">
+                  <strong>{l.donor}</strong>
+                  <span>{l.request} — {l.msg}</span>
+                </div>
+                <span className={`status-pill ${l.status === 'accepted' ? 'fulfilled' : l.status === 'declined' ? 'pending' : 'active'}`} style={{ fontSize: '0.7rem' }}>
+                  {l.status}
+                </span>
+                <span className="log-time">{l.time}</span>
+              </div>
+            ))
+          )}
+          {logType === 'blood' && whatsappEvents.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-3)' }}>No blood outreach events found in database.</div>
+          )}
+          {logType === 'manager' && managerLogs.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-3)' }}>No manager action records found.</div>
+          )}
         </div>
       </div>
     </div>
@@ -1914,6 +2115,65 @@ export default function App() {
     }
   });
 
+  const [activeOutreachDonor, setActiveOutreachDonor] = useState(null);
+  const [activeOutreachRequest, setActiveOutreachRequest] = useState(null);
+  const [whatsappStatus, setWhatsappStatus] = useState(null);
+  const [whatsappEvents, setWhatsappEvents] = useState([]);
+
+  const loadEvents = async () => {
+    try {
+      const res = await fetch('/api/admin/whatsapp/events');
+      const data = await res.json();
+      if (data && data.ok) {
+        setWhatsappEvents(data.events || []);
+      }
+    } catch (err) {
+      console.warn('Failed to load events:', err);
+    }
+  };
+
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const res = await fetch('/api/admin/whatsapp/status');
+        const data = await res.json();
+        if (data && data.ok) {
+          setWhatsappStatus(data);
+        }
+      } catch (err) {
+        console.warn('Failed to load whatsapp config:', err);
+      }
+    };
+    fetchConfig();
+    loadEvents();
+  }, []);
+
+  const [cooldowns, setCooldowns] = useState({});
+
+  useEffect(() => {
+    const activeIds = Object.keys(cooldowns).filter(id => cooldowns[id] > 0);
+    if (activeIds.length === 0) return;
+
+    const interval = setInterval(() => {
+      setCooldowns(current => {
+        const next = { ...current };
+        let changed = false;
+        for (const id of Object.keys(next)) {
+          if (next[id] > 0) {
+            next[id] -= 1;
+            changed = true;
+            if (next[id] === 0) {
+              delete next[id];
+            }
+          }
+        }
+        return changed ? next : current;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [cooldowns]);
+
   useEffect(() => {
     let active = true;
 
@@ -2123,11 +2383,11 @@ export default function App() {
         </header>
 
         <div className={`content-area ${view === 'request' ? 'request-mode' : ''}`}>
-          {view === 'dashboard' && <DashboardView donors={donors} requests={requests} onSeeAllNotifications={() => setView('logs')} onSeeAllRequests={() => setView('recent')} />}
+          {view === 'dashboard' && <DashboardView donors={donors} requests={requests} onSeeAllNotifications={() => setView('logs')} onSeeAllRequests={() => setView('recent')} onOpenOutreachModal={(donor, request) => { setActiveOutreachDonor(donor); setActiveOutreachRequest(request); }} cooldowns={cooldowns} whatsappEvents={whatsappEvents} />}
           {view === 'request'   && <RequestView donors={donors} onCreateRequest={handleCreateRequest} />}
-          {view === 'recent'    && <RecentRequestsView requests={requests} />}
-          {view === 'donors' && <DonorsView donors={donors} setDonors={setDonors} sheetMeta={sheetMeta} setSheetMeta={setSheetMeta} whatsappAlertsEnabled={whatsappAlertsEnabled} />}
-          {view === 'logs'      && <LogsView managerLogs={managerLogs} />}
+          {view === 'recent'    && <RecentRequestsView requests={requests} donors={donors} onOpenOutreachModal={(donor, request) => { setActiveOutreachDonor(donor); setActiveOutreachRequest(request); }} cooldowns={cooldowns} whatsappEvents={whatsappEvents} />}
+          {view === 'donors' && <DonorsView donors={donors} setDonors={setDonors} sheetMeta={sheetMeta} setSheetMeta={setSheetMeta} whatsappAlertsEnabled={whatsappAlertsEnabled} onOpenOutreachModal={(donor) => { setActiveOutreachDonor(donor); setActiveOutreachRequest(null); }} cooldowns={cooldowns} setCooldowns={setCooldowns} />}
+          {view === 'logs'      && <LogsView managerLogs={managerLogs} whatsappEvents={whatsappEvents} />}
           {view === 'manager'   && (managerSession
             ? <ManagerDashboardView managerSession={managerSession} onLogout={handleManagerLogout} onAddManager={handleOpenAddManager} onUpdateSession={handleManagerSessionUpdate} onRecordAction={handleRecordManagerAction} whatsappAlertsEnabled={whatsappAlertsEnabled} onToggleWhatsAppAlerts={handleToggleWhatsAppAlerts} />
             : <ManagerLoginView managerSession={managerSession} onLoginSuccess={handleManagerLoginSuccess} />
@@ -2137,6 +2397,22 @@ export default function App() {
           )}
         </div>
         <WhatsAppAdminPanel open={showWhatsAppAdmin} onClose={() => setShowWhatsAppAdmin(false)} />
+        <WhatsAppAlertModal 
+          open={activeOutreachDonor !== null} 
+          onClose={() => { setActiveOutreachDonor(null); setActiveOutreachRequest(null); }} 
+          donor={activeOutreachDonor} 
+          initialRequest={activeOutreachRequest}
+          requests={requests} 
+          onSend={async (donor, message, tName, tLang, tParams, reqId) => {
+            const result = await sendDonorWhatsAppAlert(donor, message, tName, tLang, tParams, reqId);
+            setDonors(currentDonors => currentDonors.map(d => (d.id === donor.id ? { ...d, notified: true } : d)));
+            setCooldowns(current => ({ ...current, [donor.id]: 20 }));
+            await sendBrowserNotification('WhatsApp alert sent', `${donor.name || 'Donor'} has been notified.`);
+            await loadEvents();
+            alert(result.message || `WhatsApp alert sent successfully to ${donor.name || 'Donor'}!`);
+            return result;
+          }} 
+        />
       </div>
     </div>
   );

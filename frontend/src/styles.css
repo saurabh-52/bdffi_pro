@@ -435,6 +435,8 @@ html, body, #root {
 .status-pill.pending { background: var(--amber-soft); color: var(--amber); }
 .status-pill.fulfilled { background: var(--green-soft); color: var(--green); }
 .status-pill.active { background: var(--blue-soft); color: var(--blue); }
+.status-pill.declined { background: var(--bg-4); color: var(--red); }
+.status-pill.failed { background: var(--bg-4); color: var(--red); }
 .activity-feed { display: flex; flex-direction: column; gap: 0; }
 .activity-item {
   display: flex; align-items: flex-start; gap: 0.75rem;

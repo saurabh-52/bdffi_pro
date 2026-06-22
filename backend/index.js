@@ -152,7 +152,7 @@ async function areWhatsAppAlertsEnabled() {
   }
 }
 
-async function sendMetaWhatsAppTemplateMessage({ to, templateParams = [] }) {
+async function sendMetaWhatsAppTemplateMessage({ to, templateName, templateLanguageCode, templateParams = [] }) {
   const config = getMetaWhatsAppConfig();
   const missing = getMissingMetaWhatsAppConfig(config).filter(name => name !== 'META_WHATSAPP_VERIFY_TOKEN');
   if (missing.length) {
@@ -171,11 +171,14 @@ async function sendMetaWhatsAppTemplateMessage({ to, templateParams = [] }) {
     };
   }
 
+  const activeTemplateName = String(templateName || config.templateName || 'hello_world').trim();
+  const activeLangCode = String(templateLanguageCode || config.templateLanguageCode || 'en_US').trim();
+
   const endpoint = `https://graph.facebook.com/${config.apiVersion}/${config.phoneNumberId}/messages`;
   const buildTemplatePayload = (params) => {
     const template = {
-      name: config.templateName,
-      language: { code: config.templateLanguageCode },
+      name: activeTemplateName,
+      language: { code: activeLangCode },
     };
 
     const components = buildTemplateComponents(params);
@@ -344,16 +347,41 @@ async function ensureWhatsAppEventsTable() {
     if (!has) {
       await db.schema.createTable('whatsapp_events', function(table) {
         table.increments('id').primary();
+        table.integer('request_id').nullable();
         table.string('student_name', 200).nullable();
         table.string('student_phone', 32).nullable();
         table.string('status', 32).notNullable().defaultTo('pending');
         table.string('message_id', 255).nullable();
         table.integer('attempt_count').notNullable().defaultTo(0);
         table.text('last_error').nullable();
+        table.string('response', 255).nullable();
         table.json('meta').nullable();
         table.timestamp('created_at').defaultTo(db.fn.now());
         table.timestamp('updated_at').defaultTo(db.fn.now());
       });
+    } else {
+      try {
+        if (!(await db.schema.hasColumn('whatsapp_events', 'request_id'))) {
+          await db.schema.alterTable('whatsapp_events', function(table) {
+            table.integer('request_id').nullable();
+          });
+        }
+      } catch (err) {
+        if (!String(err.message).includes('Duplicate column')) {
+          console.warn('Failed to add request_id column:', err.message);
+        }
+      }
+      try {
+        if (!(await db.schema.hasColumn('whatsapp_events', 'response'))) {
+          await db.schema.alterTable('whatsapp_events', function(table) {
+            table.string('response', 255).nullable();
+          });
+        }
+      } catch (err) {
+        if (!String(err.message).includes('Duplicate column')) {
+          console.warn('Failed to add response column:', err.message);
+        }
+      }
     }
   } catch (err) {
     console.warn('Failed to ensure whatsapp_events table:', err && err.message);
@@ -511,6 +539,10 @@ async function sendManagerWelcomeEmail(email, name, tempPassword) {
 }
 
 function normalizeDonor(row, index) {
+  const rawMobile = String(row.mobile || row.phone || row.mobile_no || '').trim();
+  const mobileDigits = rawMobile.replace(/\D+/g, '');
+  const mobile = mobileDigits.length > 10 ? mobileDigits.slice(-10) : mobileDigits;
+
   return {
     id: Number(row.id) || Date.now() + index + 1,
     name: String(row.name || '').trim(),
@@ -518,7 +550,7 @@ function normalizeDonor(row, index) {
     gender: String(row.gender || '').trim(),
     programme: String(row.programme || '').trim(),
     blood: String(row.blood || row.blood_group || '').trim(),
-    mobile: String(row.mobile || row.phone || row.mobile_no || '').trim(),
+    mobile,
     lastDon: row.lastDon || row.last_donation_date || null,
     eligible: Boolean(row.eligible ?? true),
     notified: Boolean(row.notified ?? false),
@@ -572,6 +604,9 @@ app.delete('/api/donors', async (_request, response) => {
 app.post('/api/whatsapp/alerts/send', async (request, response) => {
   try {
     const donor = request.body?.donor || null;
+    const templateName = request.body?.templateName || null;
+    const templateLanguageCode = request.body?.templateLanguageCode || null;
+    const requestId = request.body?.requestId ? Number(request.body.requestId) : null;
     const templateParams = Array.isArray(request.body?.templateParams)
       ? request.body.templateParams.map(value => String(value ?? ''))
       : [];
@@ -592,6 +627,8 @@ app.post('/api/whatsapp/alerts/send', async (request, response) => {
 
     const result = await sendMetaWhatsAppTemplateMessage({
       to: phone,
+      templateName,
+      templateLanguageCode,
       templateParams,
     });
 
@@ -601,6 +638,7 @@ app.post('/api/whatsapp/alerts/send', async (request, response) => {
       const messageId = result.payload?.messages?.[0]?.id || null;
       const status = result.ok ? 'sent' : 'failed';
       const event = {
+        request_id: requestId,
         student_name: donor.name || null,
         student_phone: phone || null,
         status,
@@ -671,6 +709,8 @@ app.get('/api/admin/whatsapp/status', async (_req, res) => {
       ok: true,
       hasConfig,
       missing,
+      templateName: config.templateName,
+      templateLanguageCode: config.templateLanguageCode,
       lastSent: lastSent || null,
       failed: Number(failedCount?.c || 0),
     });
@@ -746,6 +786,105 @@ app.get('/api/meta/whatsapp/webhook', (request, response) => {
   return response.status(403).send('Invalid webhook verification token.');
 });
 
+async function sendMetaFreeText({ to, text }) {
+  const config = getMetaWhatsAppConfig();
+  const endpoint = `https://graph.facebook.com/${config.apiVersion}/${config.phoneNumberId}/messages`;
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: 'text',
+        text: { body: text }
+      })
+    });
+    return await res.json();
+  } catch (err) {
+    console.error('Failed to send free text:', err.message);
+  }
+}
+
+async function sendMetaInteractiveButtons({ to, text, buttons }) {
+  const config = getMetaWhatsAppConfig();
+  const endpoint = `https://graph.facebook.com/${config.apiVersion}/${config.phoneNumberId}/messages`;
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'button',
+          body: { text },
+          action: {
+            buttons: buttons.map((btn) => ({
+              type: 'reply',
+              reply: {
+                id: btn.id,
+                title: btn.title
+              }
+            }))
+          }
+        }
+      })
+    });
+    return await res.json();
+  } catch (err) {
+    console.error('Failed to send interactive buttons:', err.message);
+  }
+}
+
+async function sendMetaInteractiveList({ to, text, buttonText, rows }) {
+  const config = getMetaWhatsAppConfig();
+  const endpoint = `https://graph.facebook.com/${config.apiVersion}/${config.phoneNumberId}/messages`;
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'list',
+          body: { text },
+          action: {
+            button: buttonText,
+            sections: [
+              {
+                title: 'Select Option',
+                rows: rows.map(r => ({
+                  id: r.id,
+                  title: r.title.substring(0, 24) // title must be <= 24 chars
+                }))
+              }
+            ]
+          }
+        }
+      })
+    });
+    return await res.json();
+  } catch (err) {
+    console.error('Failed to send interactive list:', err.message);
+  }
+}
+
 app.post('/api/meta/whatsapp/webhook', (request, response) => {
   const body = request.body || {};
   const summary = summarizeMetaWebhook(body);
@@ -778,8 +917,125 @@ app.post('/api/meta/whatsapp/webhook', (request, response) => {
               const from = msg?.from || null;
               const msgId = msg?.id || null;
               if (msgId && from) {
+                // Determine user selection
+                let userChoice = null;
+                let replyId = null;
+
+                if (msg.type === 'button') {
+                  // Template button click
+                  const btnText = String(msg.button?.text || '').trim().toUpperCase();
+                  if (btnText === 'YES' || btnText.includes('YES')) {
+                    userChoice = 'Yes';
+                  } else if (btnText === 'NO' || btnText.includes('NO')) {
+                    userChoice = 'No';
+                  } else {
+                    userChoice = msg.button?.text || null;
+                  }
+                } else if (msg.type === 'interactive') {
+                  const interactive = msg.interactive || {};
+                  if (interactive.type === 'button_reply') {
+                    replyId = interactive.button_reply?.id;
+                    userChoice = interactive.button_reply?.title;
+                  } else if (interactive.type === 'list_reply') {
+                    replyId = interactive.list_reply?.id;
+                    userChoice = interactive.list_reply?.title;
+                  }
+                } else if (msg.type === 'text') {
+                  const txt = String(msg.text?.body || '').trim().toUpperCase();
+                  if (txt === 'YES') {
+                    userChoice = 'Yes';
+                  } else if (txt === 'NO') {
+                    userChoice = 'No';
+                  }
+                }
+
+                // If we detected a response, update the latest outreach event in database
+                if (userChoice) {
+                  const latestEvent = await db('whatsapp_events')
+                    .where('student_phone', from)
+                    .orderBy('created_at', 'desc')
+                    .first();
+                  
+                  if (latestEvent) {
+                    const diffMs = Date.now() - new Date(latestEvent.created_at).getTime();
+                    const hours24 = 24 * 60 * 60 * 1000;
+                    
+                    if (diffMs <= hours24) {
+                      let nextResponse = userChoice;
+                      
+                      // Format response for display
+                      if (replyId === 'no_donated_recently') {
+                        nextResponse = 'No - Donated Recently';
+                      } else if (replyId === 'no_other') {
+                        nextResponse = 'No - Other';
+                      } else if (replyId && replyId.startsWith('months_')) {
+                        nextResponse = `No - Donated Recently (${userChoice})`;
+                      }
+                      
+                      await db('whatsapp_events')
+                        .where('id', latestEvent.id)
+                        .update({ 
+                          response: nextResponse,
+                          status: (userChoice === 'Yes' || userChoice.includes('YES')) ? 'accepted' : 'declined',
+                          updated_at: db.fn.now() 
+                        });
+
+                      // Send auto-responses (conversation bot)
+                      if (userChoice === 'Yes') {
+                        await sendMetaFreeText({
+                          to: from,
+                          text: 'Our volunteer will reach out to you soon if the case hasn\'t been resolved yet. Thank you for your support!'
+                        });
+                      } else if (userChoice === 'No') {
+                        await sendMetaInteractiveButtons({
+                          to: from,
+                          text: 'We understand. Could you please let us know the reason?',
+                          buttons: [
+                            { id: 'no_donated_recently', title: 'Donated recently' },
+                            { id: 'no_other', title: 'Other' }
+                          ]
+                        });
+                      } else if (replyId === 'no_other') {
+                        await sendMetaFreeText({
+                          to: from,
+                          text: 'Thank you for your cooperation.'
+                        });
+                      } else if (replyId === 'no_donated_recently') {
+                        await sendMetaInteractiveList({
+                          to: from,
+                          text: 'Could you tell us how many months ago it was?',
+                          buttonText: 'Select Months',
+                          rows: [
+                            { id: 'months_1', title: '1 month' },
+                            { id: 'months_2', title: '2 months' },
+                            { id: 'months_3', title: '3 months' },
+                            { id: 'months_other', title: 'Others' }
+                          ]
+                        });
+                      } else if (replyId && replyId.startsWith('months_')) {
+                        await sendMetaFreeText({
+                          to: from,
+                          text: 'Thank you for your cooperation.'
+                        });
+                      }
+                    } else {
+                      console.log(`Received user choice ${userChoice} but it was outside the 24h window (diff: ${diffMs} ms)`);
+                    }
+                  }
+                }
+
                 // create inbound record for tracking
-                await db('whatsapp_events').insert({ student_name: null, student_phone: from, status: 'received', message_id: msgId, attempt_count: 0, meta: toJsonText(msg) }).catch(() => {});
+                await db('whatsapp_events')
+                  .insert({ 
+                    student_name: null, 
+                    student_phone: from, 
+                    status: 'received', 
+                    message_id: msgId, 
+                    attempt_count: 0, 
+                    response: userChoice,
+                    meta: toJsonText(msg) 
+                  })
+                  .catch(() => {});
               }
             }
           }
