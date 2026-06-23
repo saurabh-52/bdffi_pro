@@ -297,6 +297,17 @@ async function activateManagerAccount(managerId) {
   return data;
 }
 
+async function demoteManagerAccount(managerId) {
+  const response = await fetch(`/api/managers/${managerId}`, { method: 'DELETE' });
+  const data = await readResponseData(response);
+
+  if (!response.ok) {
+    throw new Error(data.message || 'Failed to demote manager account.');
+  }
+
+  return data;
+}
+
 async function updateGlobalWhatsAppAlerts(managerId, enabled) {
   const response = await fetch(`/api/managers/${managerId}/alerts`, {
     method: 'POST',
@@ -354,6 +365,30 @@ async function sendBrowserNotification(title, body) {
 
   new Notification(title, { body });
   return true;
+}
+
+async function createVolunteerAccount(payload) {
+  const response = await fetch('/api/volunteers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await readResponseData(response);
+
+  if (!response.ok) {
+    throw new Error(data.message || 'Failed to create volunteer account.');
+  }
+
+  return data;
+}
+
+async function readVolunteerAccounts() {
+  const response = await fetch('/api/volunteers');
+  if (!response.ok) {
+    throw new Error('Failed to load volunteer accounts.');
+  }
+  return response.json();
 }
 
 const ACTIVITY = [
@@ -447,7 +482,7 @@ function WhatsAppAlertModal({ open, onClose, donor, initialRequest, requests, on
           <button className="action-btn" onClick={onClose}>Close</button>
         </div>
         <div style={{ padding: '1rem', display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
-          
+
           {error && <div className="manager-error">{error}</div>}
 
           <div>
@@ -462,9 +497,9 @@ function WhatsAppAlertModal({ open, onClose, donor, initialRequest, requests, on
 
           <div className="field">
             <label htmlFor="assoc-request" style={{ fontWeight: 600, color: 'var(--text-2)' }}>Associate with Blood Request:</label>
-            <select 
-              id="assoc-request" 
-              value={selectedRequest} 
+            <select
+              id="assoc-request"
+              value={selectedRequest}
               onChange={e => setSelectedRequest(e.target.value)}
             >
               <option value="none">None (General Outreach / Hello World template)</option>
@@ -494,10 +529,8 @@ function WhatsAppAdminPanel({ open, onClose }) {
   const [status, setStatus] = useState(null);
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    console.log('WhatsAppAdminPanel open=', open);
-  }, [open]);
+  const [retryingId, setRetryingId] = useState(null);
+  const [filter, setFilter] = useState('all');
 
   async function fetchStatus() {
     setLoading(true);
@@ -522,6 +555,7 @@ function WhatsAppAdminPanel({ open, onClose }) {
   }
 
   async function retryEvent(id) {
+    setRetryingId(id);
     try {
       const res = await fetch(`/api/admin/whatsapp/events/${id}/retry`, { method: 'POST' });
       const data = await res.json();
@@ -530,6 +564,8 @@ function WhatsAppAdminPanel({ open, onClose }) {
       alert(data.ok ? 'Retry succeeded' : `Retry failed: ${data.error || 'unknown'}`);
     } catch (err) {
       alert('Retry request failed: ' + err.message);
+    } finally {
+      setRetryingId(null);
     }
   }
 
@@ -537,53 +573,187 @@ function WhatsAppAdminPanel({ open, onClose }) {
 
   if (!open) return null;
 
+  const sentCount = events.filter(e => e.status === 'sent' || e.status === 'delivered' || e.status === 'read').length;
+  const failedCount = events.filter(e => e.status === 'failed').length;
+  const acceptedCount = events.filter(e => e.status === 'accepted').length;
+  const pendingCount = events.filter(e => e.status === 'pending').length;
+
+  const filteredEvents = filter === 'all' ? events : events.filter(e => {
+    if (filter === 'failed') return e.status === 'failed';
+    if (filter === 'sent') return e.status === 'sent' || e.status === 'delivered' || e.status === 'read';
+    if (filter === 'accepted') return e.status === 'accepted';
+    if (filter === 'pending') return e.status === 'pending';
+    return true;
+  });
+
+  const getEventStatusColor = (s) => {
+    if (s === 'accepted') return 'fulfilled';
+    if (s === 'failed' || s === 'declined') return 'declined';
+    if (s === 'sent' || s === 'delivered' || s === 'read') return 'active';
+    return 'pending';
+  };
+
   return (
     <div className="sheet-modal-backdrop" onClick={onClose}>
-      <div className="sheet-modal card" onClick={e => e.stopPropagation()} style={{ width: '760px', maxHeight: '70vh', overflow: 'auto' }}>
-        <div className="card-header">
-          <div>
-            <h3>WhatsApp Admin</h3>
-            <p style={{ margin: 0 }}>Manage WhatsApp event health and retries</p>
+      <div className="wa-admin-modal card" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="wa-admin-header">
+          <div className="wa-admin-header-left">
+            <div className="wa-admin-logo">📲</div>
+            <div>
+              <h3>WhatsApp Admin Console</h3>
+              <p>Monitor outreach health, retry failed messages, and review event history</p>
+            </div>
           </div>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
-            <button className="action-btn" onClick={() => { fetchStatus(); fetchEvents(); }}>Refresh</button>
-            <button className="action-btn" onClick={onClose}>Close</button>
+          <div className="wa-admin-header-actions">
+            <button className="hero-action-btn" onClick={() => { fetchStatus(); fetchEvents(); }} disabled={loading}>
+              {loading ? '⏳' : '🔄'} Refresh
+            </button>
+            <button className="hero-action-btn" onClick={onClose}>✕ Close</button>
           </div>
         </div>
-        <div style={{ padding: '1rem' }}>
-          {loading && <div>Loading…</div>}
-          {status && (
-            <div style={{ marginBottom: '1rem' }}>
-              <strong>Config OK:</strong> {String(status.hasConfig)}<br />
-              <strong>Missing:</strong> {(status.missing || []).join(', ')}<br />
-              <strong>Failed events:</strong> {status.failed || 0}
-            </div>
-          )}
 
-          <h4>Recent Events</h4>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr><th>Id</th><th>Phone</th><th>Name</th><th>Status</th><th>MsgId</th><th>Attempts</th><th>Action</th></tr>
-            </thead>
-            <tbody>
-              {events.map(ev => (
-                <tr key={ev.id} style={{ borderTop: '1px solid #eee' }}>
-                  <td>{ev.id}</td>
-                  <td style={{ fontFamily: 'monospace' }}>{ev.student_phone}</td>
-                  <td>{ev.student_name}</td>
-                  <td>{ev.status}</td>
-                  <td style={{ fontFamily: 'monospace' }}>{ev.message_id || '—'}</td>
-                  <td>{ev.attempt_count}</td>
-                  <td>
-                    {ev.student_phone
-                      ? <button className="action-btn" onClick={() => retryEvent(ev.id)}>{ev.status === 'failed' ? 'Retry' : 'Send Again'}</button>
-                      : '—'}
-                  </td>
+        {/* Status Overview Cards */}
+        <div className="wa-admin-stats">
+          <div className="wa-stat-card">
+            <div className="wa-stat-indicator">
+              <div className={`health-dot ${status?.hasConfig ? 'healthy' : 'error'}`} />
+            </div>
+            <div className="wa-stat-info">
+              <div className="wa-stat-value">{status?.hasConfig ? 'Connected' : 'Missing Config'}</div>
+              <div className="wa-stat-label">API Status</div>
+            </div>
+          </div>
+          <div className="wa-stat-card">
+            <div className="wa-stat-indicator">
+              <span style={{ fontSize: '1.1rem' }}>📄</span>
+            </div>
+            <div className="wa-stat-info">
+              <div className="wa-stat-value">{status?.templateName || 'hello_world'}</div>
+              <div className="wa-stat-label">Active Template</div>
+            </div>
+          </div>
+          <div className="wa-stat-card">
+            <div className="wa-stat-indicator">
+              <span style={{ fontSize: '1.1rem' }}>📤</span>
+            </div>
+            <div className="wa-stat-info">
+              <div className="wa-stat-value">{sentCount}</div>
+              <div className="wa-stat-label">Messages Sent</div>
+            </div>
+          </div>
+          <div className="wa-stat-card">
+            <div className="wa-stat-indicator">
+              <div className={`health-dot ${(status?.failed || 0) === 0 ? 'healthy' : 'error'}`} />
+            </div>
+            <div className="wa-stat-info">
+              <div className="wa-stat-value" style={{ color: failedCount > 0 ? 'var(--red)' : 'inherit' }}>{status?.failed || 0}</div>
+              <div className="wa-stat-label">Failed Events</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Missing Config Warning */}
+        {status && !status.hasConfig && status.missing && status.missing.length > 0 && (
+          <div className="wa-admin-warning">
+            <strong>⚠️ Missing Configuration:</strong> {status.missing.join(', ')}
+          </div>
+        )}
+
+        {/* Event Filter & Table */}
+        <div className="wa-admin-events-section">
+          <div className="wa-events-toolbar">
+            <h4>Event History</h4>
+            <div className="wa-filter-pills">
+              <button className={`wa-filter-pill ${filter === 'all' ? 'active' : ''}`} onClick={() => setFilter('all')}>
+                All ({events.length})
+              </button>
+              <button className={`wa-filter-pill ${filter === 'sent' ? 'active' : ''}`} onClick={() => setFilter('sent')}>
+                Sent ({sentCount})
+              </button>
+              <button className={`wa-filter-pill ${filter === 'accepted' ? 'active' : ''}`} onClick={() => setFilter('accepted')}>
+                Accepted ({acceptedCount})
+              </button>
+              <button className={`wa-filter-pill ${filter === 'failed' ? 'active' : ''}`} onClick={() => setFilter('failed')}>
+                Failed ({failedCount})
+              </button>
+              <button className={`wa-filter-pill ${filter === 'pending' ? 'active' : ''}`} onClick={() => setFilter('pending')}>
+                Pending ({pendingCount})
+              </button>
+            </div>
+          </div>
+
+          <div className="wa-events-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Recipient</th>
+                  <th>Status</th>
+                  <th>Message ID</th>
+                  <th>Attempts</th>
+                  <th>Reply</th>
+                  <th>Time</th>
+                  <th>Action</th>
                 </tr>
-              ))}
-              {events.length === 0 && (<tr><td colSpan={7} style={{ textAlign: 'center' }}>No events</td></tr>)}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {filteredEvents.map(ev => (
+                  <tr key={ev.id}>
+                    <td>
+                      <div className="wa-recipient">
+                        <strong>{ev.student_name || 'Unknown'}</strong>
+                        <span className="wa-phone">{ev.student_phone || '—'}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <span className={`status-pill ${getEventStatusColor(ev.status)}`}>
+                        {ev.status}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="wa-msg-id">{ev.message_id ? ev.message_id.slice(0, 16) + '…' : '—'}</span>
+                    </td>
+                    <td>
+                      <span className="wa-attempt-badge">{ev.attempt_count}</span>
+                    </td>
+                    <td>
+                      {ev.response ? (
+                        <span style={{ color: 'var(--green)', fontWeight: 600, fontSize: '0.82rem' }}>{ev.response}</span>
+                      ) : (
+                        <span style={{ color: 'var(--text-3)', fontSize: '0.8rem' }}>
+                          {ev.status === 'failed' ? (ev.last_error ? ev.last_error.slice(0, 30) + '…' : 'Error') : '—'}
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      <span className="wa-event-time">{formatISTDateTime(ev.created_at)}</span>
+                    </td>
+                    <td>
+                      {ev.student_phone ? (
+                        <button
+                          className={`action-btn ${ev.status === 'failed' ? 'notify' : ''}`}
+                          onClick={() => retryEvent(ev.id)}
+                          disabled={retryingId === ev.id}
+                        >
+                          {retryingId === ev.id ? '⏳' : ev.status === 'failed' ? '🔄 Retry' : '↻ Resend'}
+                        </button>
+                      ) : '—'}
+                    </td>
+                  </tr>
+                ))}
+                {filteredEvents.length === 0 && (
+                  <tr>
+                    <td colSpan={7}>
+                      <div className="manager-empty-state">
+                        <span className="manager-empty-state-icon">📭</span>
+                        {filter === 'all' ? 'No WhatsApp events recorded yet.' : `No ${filter} events found.`}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -718,9 +888,9 @@ function RequestItem({ request, donors = [], onOpenOutreachModal, cooldowns = {}
                         ⏳ {cooldowns[d.id]}s
                       </span>
                     ) : (
-                      <button 
-                        type="button" 
-                        className="action-btn notify" 
+                      <button
+                        type="button"
+                        className="action-btn notify"
                         style={{ padding: '0.1rem 0.4rem', fontSize: '0.68rem', borderRadius: '4px' }}
                         onClick={() => onOpenOutreachModal?.(d, request)}
                       >
@@ -967,7 +1137,7 @@ function RequestView({ donors = [], onCreateRequest }) {
 function RecentRequestsView({ requests, donors = [], onOpenOutreachModal, cooldowns = {}, whatsappEvents = [] }) {
   const [periodFilter, setPeriodFilter] = useState('all');
   const [detailsList, setDetailsList] = useState(null);
-  
+
   const filteredRequests = requests.filter(request => {
     if (periodFilter === 'all') return true;
     const p = getRequestPeriod(request.createdAt);
@@ -1061,7 +1231,7 @@ function RecentRequestsView({ requests, donors = [], onOpenOutreachModal, cooldo
 }
 
 // ── Donors View ────────────────────────────────────────────
-function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlertsEnabled, onOpenOutreachModal, cooldowns = {}, setCooldowns }) {
+function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlertsEnabled, onOpenOutreachModal, cooldowns = {}, setCooldowns, onRecordAction }) {
   const [search, setSearch] = useState('');
   const [filterBG, setFilterBG] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
@@ -1102,6 +1272,11 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
       setShowSheetPreview(false);
       setFileMessage({ type: 'success', text: `Imported ${parsedDonors.length} donors from ${file.name}.` });
       await sendBrowserNotification('Excel sheet imported', `${file.name} is now the active donor source.`);
+      onRecordAction?.({
+        request: 'Imported donor sheet',
+        status: 'accepted',
+        msg: `Active Excel sheet replaced with ${file.name} (${parsedDonors.length} rows) by Manager.`,
+      });
     } catch (error) {
       console.error(error);
       setFileMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to import donor sheet.' });
@@ -1125,6 +1300,11 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
       setShowSheetPreview(false);
       setFileMessage({ type: 'success', text: `Removed active sheet ${deletedName}.` });
       await sendBrowserNotification('Excel sheet removed', `${deletedName} was removed from the active data source.`);
+      onRecordAction?.({
+        request: 'Deleted donor sheet',
+        status: 'declined',
+        msg: `Current active sheet ${deletedName} was cleared from backend storage by Manager.`,
+      });
     } catch (error) {
       console.error(error);
       setFileMessage({ type: 'error', text: 'Failed to remove the active sheet.' });
@@ -1362,14 +1542,19 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
 }
 
 // ── Logs View ──────────────────────────────────────────────
-function LogsView({ managerLogs, whatsappEvents = [] }) {
+function LogsView({ managerLogs, whatsappEvents = [], onRefresh }) {
   const iconMap = { sent: '📤', accepted: '✅', declined: '❌', pending: '⏳', failed: '❌' };
   const [logType, setLogType] = useState('blood');
 
   return (
     <div className="logs-page animate-in">
-      <h2>Notification Log</h2>
-      <p className="page-sub">Track blood-donation notifications and manager actions separately. Blood-donation activity is shown by default.</p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.2rem' }}>
+        <h2 style={{ margin: 0 }}>Notification Log</h2>
+        <button type="button" className="topbar-btn" onClick={onRefresh}>
+          🔄 Refresh
+        </button>
+      </div>
+      <p className="page-sub">Track blood-donation notifications and admin actions separately. Blood-donation activity is shown by default.</p>
 
       <div className="log-toggle">
         <button
@@ -1384,7 +1569,7 @@ function LogsView({ managerLogs, whatsappEvents = [] }) {
           className={`log-toggle-btn ${logType === 'manager' ? 'active' : ''}`}
           onClick={() => setLogType('manager')}
         >
-          Manager Action
+          Admin Action
         </button>
       </div>
 
@@ -1415,14 +1600,11 @@ function LogsView({ managerLogs, whatsappEvents = [] }) {
           ) : (
             managerLogs.map(l => (
               <div key={l.id} className="log-row">
-                <div className={`log-icon ${l.status}`}>{iconMap[l.status] || '📲'}</div>
+                <div className="log-icon" style={{ background: 'var(--blue-soft)' }}>🔔</div>
                 <div className="log-info">
                   <strong>{l.donor}</strong>
                   <span>{l.request} — {l.msg}</span>
                 </div>
-                <span className={`status-pill ${l.status === 'accepted' ? 'fulfilled' : l.status === 'declined' ? 'pending' : 'active'}`} style={{ fontSize: '0.7rem' }}>
-                  {l.status}
-                </span>
                 <span className="log-time">{l.time}</span>
               </div>
             ))
@@ -1431,7 +1613,7 @@ function LogsView({ managerLogs, whatsappEvents = [] }) {
             <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-3)' }}>No blood outreach events found in database.</div>
           )}
           {logType === 'manager' && managerLogs.length === 0 && (
-            <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-3)' }}>No manager action records found.</div>
+            <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-3)' }}>No admin action records found.</div>
           )}
         </div>
       </div>
@@ -1439,7 +1621,7 @@ function LogsView({ managerLogs, whatsappEvents = [] }) {
   );
 }
 
-function ManagerDashboardView({ managerSession, onLogout, onAddManager, onUpdateSession, onRecordAction, whatsappAlertsEnabled, onToggleWhatsAppAlerts }) {
+function ManagerDashboardView({ managerSession, onLogout, onAddManager, onAddVolunteer, onUpdateSession, onRecordAction, whatsappAlertsEnabled, onToggleWhatsAppAlerts, donors = [], whatsappEvents = [], onOpenWhatsAppAdmin }) {
   const [managers, setManagers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [actionLoadingId, setActionLoadingId] = useState(null);
@@ -1488,6 +1670,7 @@ function ManagerDashboardView({ managerSession, onLogout, onAddManager, onUpdate
   const currentManagerId = Number(managerSession?.id);
   const activeManagers = managers.filter(manager => manager.is_primary || manager.is_active);
   const deactivatedManagers = managers.filter(manager => !manager.is_primary && !manager.is_active);
+
   const handleDeactivate = async manager => {
     const confirmed = window.confirm(`Deactivate ${manager.gmail}? You will be logged out immediately and must activate the account to sign back in.`);
     if (!confirmed) {
@@ -1506,6 +1689,31 @@ function ManagerDashboardView({ managerSession, onLogout, onAddManager, onUpdate
       }
     } catch (deactivateError) {
       setError(deactivateError instanceof Error ? deactivateError.message : 'Failed to deactivate manager account.');
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleDemote = async manager => {
+    const confirmed = window.confirm(`Remove ${manager.name} (${manager.gmail}) from Managers? They will be demoted back to a Volunteer.`);
+    if (!confirmed) {
+      return;
+    }
+
+    setActionLoadingId(manager.id);
+    setError('');
+
+    try {
+      await demoteManagerAccount(manager.id);
+      setManagers(current => current.filter(item => item.id !== manager.id));
+
+      onRecordAction?.({
+        request: 'Demoted Manager',
+        status: 'declined',
+        msg: `Manager ${manager.name} (${manager.gmail}) was demoted back to a Volunteer by Manager ${managerSession?.name} (${managerSession?.gmail}).`,
+      });
+    } catch (demoteError) {
+      setError(demoteError instanceof Error ? demoteError.message : 'Failed to demote manager account.');
     } finally {
       setActionLoadingId(null);
     }
@@ -1541,116 +1749,277 @@ function ManagerDashboardView({ managerSession, onLogout, onAddManager, onUpdate
     }
   };
 
+  // Derived data for stats
+  const totalDonors = donors.length;
+  const eligibleDonors = donors.filter(d => d.eligible).length;
+  const totalEvents = whatsappEvents.length;
+  const sentEvents = whatsappEvents.filter(e => e.status === 'sent' || e.status === 'delivered' || e.status === 'read').length;
+  const failedEvents = whatsappEvents.filter(e => e.status === 'failed').length;
+  const recentEvents = whatsappEvents.slice(0, 6);
+
+  // Manager initials for avatar
+  const managerInitials = (managerSession?.name || 'M')
+    .split(' ')
+    .map(w => w[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
+
+  // Greeting based on time of day
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+
   return (
     <div className="manager-page animate-in">
-      <div className="manager-hero manager-dashboard-hero">
-        <div className="manager-badge">Manager Dashboard</div>
-        <h2>Manage manager Gmail accounts</h2>
-        <p>Signed in as {managerSession?.gmail || 'a manager'} and able to add more manager accounts from this screen.</p>
-          <div className="manager-dashboard-hero-meta">
-          <div>
-            <span className="manager-label">Current session</span>
-            <strong>{managerSession?.gmail}</strong>
+      {/* ── Glassmorphism Hero ── */}
+      <div className="manager-hero-glass">
+        <div className="manager-hero-top">
+          <div className="manager-hero-greeting">
+            <div className="manager-badge">Manager Dashboard</div>
+            <h2>{greeting}, {managerSession?.name?.split(' ')[0] || 'Manager'} 👋</h2>
+            <p>Manage accounts, monitor WhatsApp outreach, and oversee your donor network from one place.</p>
           </div>
-          <div className="global-alert-toggle">
-            <label className={`switch ${actionLoadingId != null ? 'disabled' : ''}`}>
-              <input
-                type="checkbox"
-                checked={whatsappAlertsEnabled}
-                disabled={actionLoadingId != null}
-                onChange={() => handleToggleAlerts(managerSession)}
-              />
-              <span className="slider" />
-            </label>
-            <div className="toggle-label">{whatsappAlertsEnabled ? 'Alerts On' : 'Alerts Off'}</div>
+          <div className="manager-hero-controls">
+            <div className={`alert-status-chip ${whatsappAlertsEnabled ? 'alert-active' : 'alert-paused'}`}>
+              <span className="alert-chip-icon">{whatsappAlertsEnabled ? '✅' : '⏸️'}</span>
+              <div className="alert-chip-text">
+                <span className="alert-chip-title">{whatsappAlertsEnabled ? 'Active' : 'Paused'}</span>
+                <span className="alert-chip-label">Alerts</span>
+              </div>
+              <div className="global-alert-toggle">
+                <label className={`switch ${actionLoadingId != null ? 'disabled' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={whatsappAlertsEnabled}
+                    disabled={actionLoadingId != null}
+                    onChange={() => handleToggleAlerts(managerSession)}
+                  />
+                  <span className="slider" />
+                </label>
+              </div>
+            </div>
+            <button type="button" className="action-btn notify logout-btn" onClick={onLogout}>
+              <span className="logout-arrow">←</span>
+              Logout
+            </button>
           </div>
-          <button type="button" className="action-btn notify logout-btn" onClick={onLogout}>
-            <span className="logout-arrow">←</span>
-            Logout
-          </button>
+        </div>
+        <div className="manager-hero-session">
+          <div className="manager-hero-session-info">
+            <div className="manager-avatar">{managerInitials}</div>
+            <div className="manager-avatar-details">
+              <span className="manager-avatar-name">{managerSession?.name || 'Manager'}</span>
+              <span className="manager-avatar-email">{managerSession?.gmail || 'No session'}</span>
+            </div>
+          </div>
+          <div className="manager-hero-actions">
+            <button type="button" className="hero-action-btn primary" onClick={onAddVolunteer}>
+              ➕ Add Volunteer
+            </button>
+            <div className="session-status-badge">
+              <div className="status-dot" />
+              Session Active
+            </div>
+          </div>
         </div>
       </div>
 
-      <div className="manager-dashboard-grid">
-        <div className="manager-card card">
-          <div className="card-header">
-            <div>
-              <h3>Active Accounts</h3>
-              <p>{loading ? 'Loading accounts…' : `${activeManagers.length} active account${activeManagers.length === 1 ? '' : 's'}`}</p>
-            </div>
-            <button type="button" className="btn btn-primary manager-card-action" onClick={onAddManager}>
-              ➕ Add Account
-            </button>
+      {/* ── System Overview Stats ── */}
+      <div className="manager-overview-stats">
+        <div className="manager-stat-card accent-red stagger-1">
+          <div className="manager-stat-icon">👥</div>
+          <div className="manager-stat-value">{activeManagers.length}</div>
+          <div className="manager-stat-label">Active Managers</div>
+          <div className="manager-stat-sub neutral">{managers.length} total</div>
+        </div>
+        <div className="manager-stat-card accent-green stagger-2">
+          <div className="manager-stat-icon">🩸</div>
+          <div className="manager-stat-value">{totalDonors}</div>
+          <div className="manager-stat-label">Registered Donors</div>
+          <div className="manager-stat-sub positive">{eligibleDonors} eligible</div>
+        </div>
+        <div
+          className="manager-stat-card accent-blue stagger-3 clickable"
+          onClick={onOpenWhatsAppAdmin}
+          title="Click to open WhatsApp Admin Console"
+        >
+          <div className="manager-stat-icon">📲</div>
+          <div className="manager-stat-value">{totalEvents}</div>
+          <div className="manager-stat-label" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+            WhatsApp Events
+            <span style={{ fontSize: '0.72rem', opacity: 0.6 }}>↗</span>
           </div>
-
-          <div className="manager-self-service-note">
-            You can only deactivate your own account. You will be asked to confirm and then logged out immediately.
+          <div className={`manager-stat-sub ${failedEvents > 0 ? 'warning' : 'positive'}`}>
+            {sentEvents} sent{failedEvents > 0 ? ` · ${failedEvents} failed` : ''}
           </div>
+        </div>
+      </div>
 
-          <div className="manager-summary-grid">
-            <div>
-              <span className="manager-label">Primary Manager</span>
-              <strong>{primaryManager?.gmail || 'Not available'}</strong>
-            </div>
-            <div>
-              <span className="manager-label">Total Accounts</span>
-              <strong>{managers.length}</strong>
-            </div>
-          </div>
+      {error && <div className="manager-error">{error}</div>}
 
-          <div className="manager-account-list">
-            {activeManagers.map(manager => (
-              <div key={manager.id || manager.gmail} className="manager-account-item">
-                <div>
-                  <strong>{manager.name}</strong>
-                  <span>{manager.gmail}</span>
-                </div>
-                <div className="manager-account-actions">
-                  <div className={`manager-account-badge ${manager.is_primary ? 'primary' : ''}`}>
-                    {manager.is_primary ? 'Primary' : 'Manager'}
-                  </div>
-                  {!manager.is_primary && currentManagerId === Number(manager.id) && (
-                    <button
-                      type="button"
-                      className="manager-deactivate-btn"
-                      disabled={actionLoadingId === manager.id}
-                      onClick={() => handleDeactivate(manager)}
-                    >
-                      {actionLoadingId === manager.id ? '…' : 'Deactivate'}
-                    </button>
-                  )}
-                </div>
+      {/* ── Two-Column Content ── */}
+      <div className="manager-two-col-grid">
+        {/* Left Column: Account Management */}
+        <div className="section-gap">
+          {/* Active Accounts */}
+          <div className="manager-card card">
+            <div className="card-header">
+              <div>
+                <h3>Active Manager Accounts</h3>
+                <p>{loading ? 'Loading accounts…' : `${activeManagers.length} active account${activeManagers.length === 1 ? '' : 's'}`}</p>
               </div>
-            ))}
-            {!loading && activeManagers.length === 0 && (
-              <div className="manager-info">No manager accounts found yet.</div>
-            )}
+              <button type="button" className="btn btn-primary manager-card-action" onClick={onAddManager}>
+                ➕ Add Manager
+              </button>
+            </div>
+
+            {/* <div className="manager-self-service-note"> */}
+            {/* You can only deactivate your own account. You will be asked to confirm and then logged out immediately. */}
+            {/* </div> */}
+
+            <div className="manager-account-list">
+              {activeManagers.map(manager => (
+                <div key={manager.id || manager.gmail} className="manager-account-item">
+                  <div>
+                    <strong>{manager.name}</strong>
+                    <span>{manager.gmail}</span>
+                  </div>
+                  <div className="manager-account-actions">
+                    {!manager.is_primary && currentManagerId === Number(manager.id) && (
+                      <button
+                        type="button"
+                        className="manager-deactivate-btn"
+                        disabled={actionLoadingId === manager.id}
+                        onClick={() => handleDeactivate(manager)}
+                      >
+                        {actionLoadingId === manager.id ? '…' : 'Deactivate'}
+                      </button>
+                    )}
+                    {!manager.is_primary && managerSession?.is_primary && currentManagerId !== Number(manager.id) && (
+                      <button
+                        type="button"
+                        className="manager-deactivate-btn"
+                        disabled={actionLoadingId === manager.id}
+                        onClick={() => handleDemote(manager)}
+                      >
+                        {actionLoadingId === manager.id ? '…' : 'Remove'}
+                      </button>
+                    )}
+                    <div className={`manager-account-badge ${manager.is_primary ? 'primary' : ''}`}>
+                      {manager.is_primary ? 'Primary' : 'Manager'}
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {!loading && activeManagers.length === 0 && (
+                <div className="manager-empty-state">
+                  <span className="manager-empty-state-icon">👤</span>
+                  No manager accounts found yet.
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Deactivated Accounts */}
+          <div className="manager-card card">
+            <div className="card-header">
+              <div>
+                <h3>Deactivated Manager Accounts</h3>
+                <p>{loading ? 'Loading accounts…' : `${deactivatedManagers.length} deactivated account${deactivatedManagers.length === 1 ? '' : 's'}`}</p>
+              </div>
+            </div>
+
+            <div className="manager-account-list">
+              {deactivatedManagers.map(manager => (
+                <div key={manager.id || manager.gmail} className="manager-account-item inactive">
+                  <div>
+                    <strong>{manager.name}</strong>
+                    <span>{manager.gmail}</span>
+                  </div>
+                  <div className="manager-account-actions">
+                    <div className="manager-account-badge inactive">Deactivated</div>
+                  </div>
+                </div>
+              ))}
+              {!loading && deactivatedManagers.length === 0 && (
+                <div className="manager-empty-state">
+                  <span className="manager-empty-state-icon">✨</span>
+                  No deactivated accounts.
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
-        <div className="manager-card card">
-          <div className="card-header">
-            <div>
-              <h3>Deactivated Accounts</h3>
-              <p>{loading ? 'Loading accounts…' : `${deactivatedManagers.length} deactivated account${deactivatedManagers.length === 1 ? '' : 's'}`}</p>
+        {/* Right Column: Activity + Health */}
+        <div className="section-gap">
+          {/* Recent WhatsApp Activity */}
+          <div className="manager-card card">
+            <div className="card-header">
+              <div>
+                <h3>Recent Activity</h3>
+                <p>Latest WhatsApp outreach events</p>
+              </div>
+              <span className="status-pill active">Live</span>
+            </div>
+
+            <div className="manager-activity-mini">
+              {recentEvents.length > 0 ? recentEvents.map(e => (
+                <div key={e.id} className="manager-activity-item">
+                  <div className={`manager-activity-dot ${e.status === 'accepted' ? 'green' :
+                    e.status === 'declined' || e.status === 'failed' ? 'red' :
+                      e.status === 'sent' || e.status === 'delivered' ? 'blue' : 'amber'
+                    }`} />
+                  <div className="manager-activity-content">
+                    <strong>{e.student_name || 'Donor'} ({e.student_phone})</strong>
+                    <span>
+                      {e.response ? `Reply: ${e.response}` :
+                        e.status === 'failed' ? `Failed: ${e.last_error || 'Unknown'}` :
+                          'Awaiting reply…'}
+                    </span>
+                  </div>
+                  <span className="manager-activity-time">{formatISTDateTime(e.created_at)}</span>
+                </div>
+              )) : (
+                <div className="manager-empty-state">
+                  <span className="manager-empty-state-icon">📭</span>
+                  No WhatsApp events recorded yet.
+                </div>
+              )}
             </div>
           </div>
 
-          <div className="manager-account-list">
-            {deactivatedManagers.map(manager => (
-              <div key={manager.id || manager.gmail} className="manager-account-item inactive">
-                <div>
-                  <strong>{manager.name}</strong>
-                  <span>{manager.gmail}</span>
-                </div>
-                <div className="manager-account-actions">
-                  <div className="manager-account-badge inactive">Deactivated</div>
-                </div>
+          {/* System Health */}
+          <div className="manager-card card">
+            <div className="card-header">
+              <div>
+                <h3>System Health</h3>
+                <p>Platform and integration status</p>
               </div>
-            ))}
-            {!loading && deactivatedManagers.length === 0 && (
-              <div className="manager-info">No deactivated accounts.</div>
-            )}
+            </div>
+
+            <div className="system-health-grid">
+              <div className="health-indicator">
+                <div className={`health-dot ${whatsappAlertsEnabled ? 'healthy' : 'warning'}`} />
+                <span className="health-label">WhatsApp API</span>
+                <span className="health-value">{whatsappAlertsEnabled ? 'Connected' : 'Paused'}</span>
+              </div>
+              <div className="health-indicator">
+                <div className={`health-dot ${totalDonors > 0 ? 'healthy' : 'warning'}`} />
+                <span className="health-label">Donor Pool</span>
+                <span className="health-value">{totalDonors} loaded</span>
+              </div>
+              <div className="health-indicator">
+                <div className={`health-dot ${failedEvents === 0 ? 'healthy' : 'error'}`} />
+                <span className="health-label">Event Failures</span>
+                <span className="health-value">{failedEvents} failed</span>
+              </div>
+              <div className="health-indicator">
+                <div className={`health-dot ${activeManagers.length > 0 ? 'healthy' : 'warning'}`} />
+                <span className="health-label">Access Control</span>
+                <span className="health-value">{activeManagers.length} active</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1658,43 +2027,71 @@ function ManagerDashboardView({ managerSession, onLogout, onAddManager, onUpdate
   );
 }
 
-function ManagerAddAccountView({ managerSession, onLogout, onBackToDashboard }) {
+function ManagerAddAccountView({ managerSession, onLogout, onBackToDashboard, onRecordAction }) {
+  const [volunteers, setVolunteers] = useState([]);
+  const [managers, setManagers] = useState([]);
+  const [selectedEmail, setSelectedEmail] = useState('');
+  const [loadingInit, setLoadingInit] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  const [form, setForm] = useState({ name: '', gmail: '' });
-  const [tempPassword, setTempPassword] = useState(() => generateTemporaryPassword());
+  const [reloadTrigger, setReloadTrigger] = useState(0);
 
-  function generateTemporaryPassword() {
-    if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
-      const bytes = new Uint8Array(12);
-      window.crypto.getRandomValues(bytes);
-      return Array.from(bytes, byte => (byte % 36).toString(36)).join('').slice(0, 12);
-    }
+  useEffect(() => {
+    let active = true;
+    const fetchData = async () => {
+      setLoadingInit(true);
+      setError('');
+      try {
+        const [vList, mList] = await Promise.all([
+          readVolunteerAccounts(),
+          readManagerAccounts()
+        ]);
+        if (!active) return;
+        setVolunteers(Array.isArray(vList) ? vList : []);
+        setManagers(Array.isArray(mList) ? mList : []);
+      } catch (err) {
+        if (active) {
+          setError(err instanceof Error ? err.message : 'Failed to load volunteer or manager accounts.');
+        }
+      } finally {
+        if (active) setLoadingInit(false);
+      }
+    };
+    fetchData();
+    return () => { active = false; };
+  }, [reloadTrigger]);
 
-    return `tmp-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
-  }
-
-  const handleChange = event => {
-    const { name, value } = event.target;
-    setForm(current => ({ ...current, [name]: value }));
-  };
+  const candidates = volunteers.filter(v =>
+    !managers.some(m => m.gmail.toLowerCase() === v.email.toLowerCase() && (m.is_primary || m.is_active))
+  );
 
   const handleSubmit = async event => {
     event.preventDefault();
+    if (!selectedEmail) {
+      setError('Please select a volunteer to promote.');
+      return;
+    }
     setLoading(true);
     setError('');
     setMessage('');
 
     try {
-      const createdManager = await createManagerAccount({ ...form, password: tempPassword });
-      setForm({ name: '', gmail: '' });
-      setTempPassword(generateTemporaryPassword());
-      setMessage(createdManager.tempPassword
-        ? `Added ${createdManager.gmail}. Temporary password: ${createdManager.tempPassword}`
-        : `Added ${createdManager.gmail}. The temporary password was emailed to the new manager.`);
+      const response = await createManagerAccount({ gmail: selectedEmail });
+      const selectedVol = volunteers.find(v => v.email === selectedEmail);
+      const volName = selectedVol ? selectedVol.name : 'Unknown';
+
+      onRecordAction?.({
+        request: 'Promoted Volunteer to Manager',
+        status: 'accepted',
+        msg: `Volunteer ${volName} (${selectedEmail}) was promoted to Manager by Manager ${managerSession?.name || 'Manager'} (${managerSession?.gmail || ''}).`,
+      });
+
+      setMessage(response.message || `Successfully promoted ${selectedEmail} to Manager.`);
+      setSelectedEmail('');
+      setReloadTrigger(prev => prev + 1);
     } catch (createError) {
-      setError(createError instanceof Error ? createError.message : 'Failed to create manager account.');
+      setError(createError instanceof Error ? createError.message : 'Failed to promote volunteer to manager.');
     } finally {
       setLoading(false);
     }
@@ -1703,9 +2100,9 @@ function ManagerAddAccountView({ managerSession, onLogout, onBackToDashboard }) 
   return (
     <div className="manager-page animate-in">
       <div className="manager-hero">
-        <div className="manager-badge">Add Manager</div>
-        <h2>Create a new manager account</h2>
-        <p>Add a Gmail-based manager login from its own page.</p>
+        <div className="manager-badge">Promote Volunteer</div>
+        <h2>Promote Volunteer to Manager</h2>
+        <p>Grant manager permissions to an existing volunteer. They will use their existing credentials to login.</p>
         <div className="manager-dashboard-hero-meta">
           <div>
             <span className="manager-label">Current session</span>
@@ -1718,48 +2115,49 @@ function ManagerAddAccountView({ managerSession, onLogout, onBackToDashboard }) 
       <form className="manager-card card manager-form-page" onSubmit={handleSubmit}>
         <div className="card-header">
           <div>
-            <h3>Manager Details</h3>
-            <p>Enter the new manager name, Gmail address, and password</p>
+            <h3>Promotion Console</h3>
+            <p>Select an existing volunteer from the dropdown to promote them to Manager</p>
           </div>
           <button type="button" className="action-btn" onClick={onBackToDashboard}>Back to dashboard</button>
         </div>
 
         <div className="manager-form-grid">
-          <div className="field">
-            <label htmlFor="managerName">Manager Name</label>
-            <input
-              id="managerName"
-              name="name"
-              type="text"
-              value={form.name}
-              onChange={handleChange}
-              placeholder="Fast Forward India Manager"
-              required
-            />
-          </div>
-
-          <div className="field">
-            <label htmlFor="managerGmail">Manager Gmail</label>
-            <input
-              id="managerGmail"
-              name="gmail"
-              type="email"
-              value={form.gmail}
-              onChange={handleChange}
-              placeholder="manager2@fastforwardindia.org"
-              autoComplete="email"
-              required
-            />
-          </div>
+          {loadingInit ? (
+            <div className="manager-info">⏳ Loading accounts and volunteers list...</div>
+          ) : candidates.length === 0 ? (
+            <div className="manager-info">
+              ⚠️ No volunteers available for promotion. Either all volunteers are already managers or no volunteer accounts have been created yet.
+            </div>
+          ) : (
+            <div className="field">
+              <label htmlFor="promoteVolunteerSelect">Select Volunteer</label>
+              <select
+                id="promoteVolunteerSelect"
+                value={selectedEmail}
+                onChange={e => setSelectedEmail(e.target.value)}
+                required
+                style={{ width: '100%', padding: '0.6rem', borderRadius: 'var(--radius-sm)', background: 'var(--bg-3)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
+              >
+                <option value="">-- Choose a Volunteer --</option>
+                {candidates.map(c => (
+                  <option key={c.id} value={c.email}>
+                    {c.name} ({c.email})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {error && <div className="manager-error">{error}</div>}
           {message && <div className="manager-info">{message}</div>}
 
-          <div className="manager-actions manager-actions-right">
-            <button type="submit" className="btn btn-primary" disabled={loading}>
-              {loading ? '⏳ Saving…' : '➕ Add Manager'}
-            </button>
-          </div>
+          {!loadingInit && candidates.length > 0 && (
+            <div className="manager-actions manager-actions-right">
+              <button type="submit" className="btn btn-primary" disabled={loading}>
+                {loading ? '⏳ Promoting…' : '🌟 Promote to Manager'}
+              </button>
+            </div>
+          )}
         </div>
       </form>
     </div>
@@ -2080,6 +2478,386 @@ function ForgotPasswordPage() {
     </div>
   );
 }
+// ── Volunteer Login View ───────────────────────────────────
+function VolunteerLoginView({ onLoginSuccess }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [forgotMode, setForgotMode] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [forgotMessage, setForgotMessage] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleLogin = async event => {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+
+    try {
+      const response = await fetch('/api/volunteer/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await readResponseData(response);
+
+      if (!response.ok) {
+        throw new Error(data.message || 'Login failed.');
+      }
+
+      onLoginSuccess?.(data);
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : 'Login failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleForgot = async event => {
+    event.preventDefault();
+    setForgotLoading(true);
+    setForgotMessage('');
+
+    try {
+      const response = await fetch('/api/volunteer/forgot/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: forgotEmail || email }),
+      });
+      const data = await readResponseData(response);
+      setForgotMessage(data?.message || 'If the email matches a volunteer account, a reset link has been sent.');
+    } catch (err) {
+      setForgotMessage(err instanceof Error ? err.message : 'Failed to request password reset.');
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+  return (
+    <div className="volunteer-login-page">
+      <div className="orb orb-1" />
+      <div className="orb orb-2" />
+      <div className="volunteer-login-container">
+        <div className="volunteer-login-card">
+          <div className="volunteer-login-logo">
+            <img src="https://res.cloudinary.com/dvjschjlg/image/upload/v1722862190/FFI/Logo/gpq3l0srvnvyyjzeg8k5.png" alt="Fast Forward India logo" className="volunteer-logo-img" />
+            <div className="volunteer-login-brand">
+              <strong>Fast Forward India</strong>
+              <span>Blood Donation Management System</span>
+            </div>
+          </div>
+
+          <div className="volunteer-login-header">
+            <div className="volunteer-badge">Volunteer Portal</div>
+            <h2>{forgotMode ? 'Reset Password' : 'Welcome Back'}</h2>
+            <p>{forgotMode ? 'Enter your email to receive a password reset link' : 'Sign in to access the blood donation dashboard'}</p>
+          </div>
+
+          <form onSubmit={forgotMode ? handleForgot : handleLogin}>
+            <div className="field">
+              <label htmlFor="volunteerEmail">Email Address</label>
+              <input
+                id="volunteerEmail"
+                type="email"
+                value={forgotMode ? forgotEmail : email}
+                onChange={e => forgotMode ? setForgotEmail(e.target.value) : setEmail(e.target.value)}
+                placeholder="volunteer@fastforwardindia.org"
+                autoComplete="email"
+                required
+              />
+            </div>
+
+            {!forgotMode && (
+              <div className="field">
+                <label htmlFor="volunteerPassword">Password</label>
+                <input
+                  id="volunteerPassword"
+                  type="password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="Enter your password"
+                  autoComplete="current-password"
+                  required
+                />
+              </div>
+            )}
+
+            {error && <div className="manager-error">{error}</div>}
+            {forgotMessage && <div className="manager-info">{forgotMessage}</div>}
+
+            <button type="submit" className="btn btn-primary volunteer-login-btn" disabled={forgotMode ? forgotLoading : loading}>
+              {forgotMode
+                ? (forgotLoading ? '⏳ Sending…' : '📧 Send Reset Link')
+                : (loading ? '⏳ Signing in…' : '🔐 Sign In')
+              }
+            </button>
+          </form>
+
+          <div className="volunteer-login-footer">
+            <button type="button" className="volunteer-forgot-btn" onClick={() => {
+              setForgotMode(!forgotMode);
+              setForgotMessage('');
+              setError('');
+            }}>
+              {forgotMode ? '← Back to login' : 'Forgot password?'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Volunteer Forgot Password Page ─────────────────────────
+function VolunteerForgotPasswordPage() {
+  const pathState = getPathState();
+  const [token, setToken] = useState(pathState.token);
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !pathState.token) return;
+
+    const cleanUrl = new URL(window.location.href);
+    cleanUrl.searchParams.delete('token');
+    cleanUrl.searchParams.delete('resetToken');
+    window.history.replaceState({}, '', `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
+  }, [pathState.token]);
+
+  useEffect(() => {
+    setShowPassword(false);
+    setShowConfirmPassword(false);
+  }, []);
+
+  const handleSubmit = async event => {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+    setMessage('');
+
+    if (password !== confirmPassword) {
+      setLoading(false);
+      setError('Passwords do not match.');
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/volunteer/forgot/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, password }),
+      });
+      const data = await readResponseData(response);
+
+      if (!response.ok) {
+        throw new Error(data.message || 'Reset failed.');
+      }
+
+      setMessage(data.message || 'Password updated. You can now sign in.');
+      setPassword('');
+      setConfirmPassword('');
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Reset failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="volunteer-forgot-page">
+      <div className="orb orb-1" />
+      <div className="orb orb-2" />
+      <div className="volunteer-login-container">
+        <div className="volunteer-login-card">
+          <div className="volunteer-login-logo">
+            <img src="https://res.cloudinary.com/dvjschjlg/image/upload/v1722862190/FFI/Logo/gpq3l0srvnvyyjzeg8k5.png" alt="Fast Forward India logo" className="volunteer-logo-img" />
+            <div className="volunteer-login-brand">
+              <strong>Fast Forward India</strong>
+              <span>Blood Donation Management System</span>
+            </div>
+          </div>
+
+          <div className="volunteer-login-header">
+            <div className="volunteer-badge">Password Reset</div>
+            <h2>Create a New Password</h2>
+            <p>Open the link from your email and choose a new password.</p>
+          </div>
+
+          <form onSubmit={handleSubmit}>
+            {!token && (
+              <div className="manager-info">
+                The reset link is missing its token. Please open the link from your email again.
+              </div>
+            )}
+
+            <div className="field">
+              <label htmlFor="volNewPassword">New Password</label>
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <input
+                  id="volNewPassword"
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="Enter a new password"
+                  autoComplete="new-password"
+                  required
+                  style={{ flex: 1 }}
+                />
+                <EyeToggleButton
+                  shown={showPassword}
+                  onClick={() => setShowPassword(current => !current)}
+                  label={showPassword ? 'Hide password' : 'Show password'}
+                />
+              </div>
+            </div>
+
+            <div className="field">
+              <label htmlFor="volConfirmPassword">Confirm Password</label>
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <input
+                  id="volConfirmPassword"
+                  type={showConfirmPassword ? 'text' : 'password'}
+                  value={confirmPassword}
+                  onChange={e => setConfirmPassword(e.target.value)}
+                  placeholder="Repeat the new password"
+                  autoComplete="new-password"
+                  required
+                  style={{ flex: 1 }}
+                />
+                <EyeToggleButton
+                  shown={showConfirmPassword}
+                  onClick={() => setShowConfirmPassword(current => !current)}
+                  label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
+                />
+              </div>
+            </div>
+
+            {error && <div className="manager-error">{error}</div>}
+            {message && <div className="manager-info">{message}</div>}
+
+            <button type="submit" className="btn btn-primary volunteer-login-btn" disabled={loading}>
+              {loading ? '⏳ Resetting…' : '🔁 Update Password'}
+            </button>
+          </form>
+
+          <div className="volunteer-login-footer">
+            <button type="button" className="volunteer-forgot-btn" onClick={() => { window.location.href = '/'; }}>
+              ← Back to login
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Volunteer Add Account View ─────────────────────────────
+function VolunteerAddAccountView({ managerSession, onLogout, onBackToDashboard, onRecordAction }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [form, setForm] = useState({ name: '', email: '' });
+
+  const handleChange = event => {
+    const { name, value } = event.target;
+    setForm(current => ({ ...current, [name]: value }));
+  };
+
+  const handleSubmit = async event => {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+    setMessage('');
+
+    try {
+      const createdVolunteer = await createVolunteerAccount(form);
+
+      onRecordAction?.({
+        request: 'Created Volunteer Account',
+        status: 'accepted',
+        msg: `Volunteer ${createdVolunteer.name} (${createdVolunteer.email}) was added by Manager ${managerSession?.name || 'Manager'} (${managerSession?.gmail || ''}).`,
+      });
+
+      setForm({ name: '', email: '' });
+      setMessage(`Added ${createdVolunteer.email}. An activation email has been sent (valid for 7 days).`);
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : 'Failed to create volunteer account.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="manager-page animate-in">
+      <div className="manager-hero">
+        <div className="manager-badge">Add Volunteer</div>
+        <h2>Create a new volunteer account</h2>
+        <p>Add a volunteer login from this page. The volunteer will receive an activation email to set their password.</p>
+        <div className="manager-dashboard-hero-meta">
+          <div>
+            <span className="manager-label">Current session</span>
+            <strong>{managerSession?.gmail}</strong>
+          </div>
+          <button type="button" className="action-btn notify" onClick={onLogout}>Logout</button>
+        </div>
+      </div>
+
+      <form className="manager-card card manager-form-page" onSubmit={handleSubmit}>
+        <div className="card-header">
+          <div>
+            <h3>Volunteer Details</h3>
+            <p>Enter the new volunteer name and email address to send them an activation link</p>
+          </div>
+          <button type="button" className="action-btn" onClick={onBackToDashboard}>Back to dashboard</button>
+        </div>
+
+        <div className="manager-form-grid">
+          <div className="field">
+            <label htmlFor="volunteerAddName">Volunteer Name</label>
+            <input
+              id="volunteerAddName"
+              name="name"
+              type="text"
+              value={form.name}
+              onChange={handleChange}
+              placeholder="Volunteer full name"
+              required
+            />
+          </div>
+
+          <div className="field">
+            <label htmlFor="volunteerAddEmail">Volunteer Email</label>
+            <input
+              id="volunteerAddEmail"
+              name="email"
+              type="email"
+              value={form.email}
+              onChange={handleChange}
+              placeholder="volunteer@fastforwardindia.org"
+              autoComplete="email"
+              required
+            />
+          </div>
+
+          {error && <div className="manager-error">{error}</div>}
+          {message && <div className="manager-info">{message}</div>}
+
+          <div className="manager-actions manager-actions-right">
+            <button type="submit" className="btn btn-primary" disabled={loading}>
+              {loading ? '⏳ Saving…' : '➕ Add Volunteer'}
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
 
 // ── App Shell ──────────────────────────────────────────────
 export default function App() {
@@ -2103,13 +2881,24 @@ export default function App() {
       return true;
     }
   });
-  const [managerLogs, setManagerLogs] = useState(MANAGER_NOTIFICATION_LOGS);
+  const [managerLogs, setManagerLogs] = useState([]);
   const [managerSession, setManagerSession] = useState(() => {
     if (typeof window === 'undefined') return null;
     try {
       const stored = window.localStorage.getItem('manager-session');
       const parsed = stored ? JSON.parse(stored) : null;
       return parsed && parsed.id != null ? { ...parsed, whatsapp_alerts_enabled: parsed.whatsapp_alerts_enabled !== false } : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [volunteerSession, setVolunteerSession] = useState(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const stored = window.localStorage.getItem('volunteer-session');
+      const parsed = stored ? JSON.parse(stored) : null;
+      return parsed && parsed.id != null ? parsed : null;
     } catch {
       return null;
     }
@@ -2132,6 +2921,31 @@ export default function App() {
     }
   };
 
+  const loadManagerLogs = async () => {
+    try {
+      const res = await fetch('/api/admin/manager-logs');
+      const data = await res.json();
+      if (data && data.ok) {
+        const mappedLogs = (data.logs || []).map(item => ({
+          id: item.id,
+          donor: item.actor,
+          request: item.request,
+          msg: item.msg,
+          status: item.status,
+          time: formatISTDateTime(item.created_at) || 'just now',
+        }));
+        setManagerLogs(mappedLogs);
+      }
+    } catch (err) {
+      console.warn('Failed to load manager logs:', err);
+    }
+  };
+
+  const handleRefreshLogs = async () => {
+    await loadEvents();
+    await loadManagerLogs();
+  };
+
   useEffect(() => {
     const fetchConfig = async () => {
       try {
@@ -2145,8 +2959,14 @@ export default function App() {
       }
     };
     fetchConfig();
-    loadEvents();
   }, []);
+
+  useEffect(() => {
+    if (view === 'logs' || view === 'manager' || view === 'dashboard') {
+      loadEvents();
+      loadManagerLogs();
+    }
+  }, [view]);
 
   const [cooldowns, setCooldowns] = useState({});
 
@@ -2216,6 +3036,16 @@ export default function App() {
   }, [managerSession]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    if (volunteerSession) {
+      window.localStorage.setItem('volunteer-session', JSON.stringify(volunteerSession));
+    } else {
+      window.localStorage.removeItem('volunteer-session');
+    }
+  }, [volunteerSession]);
+
+  useEffect(() => {
     if (typeof window === 'undefined' || !window.location.hash) return;
 
     const cleanUrl = `${window.location.pathname}${window.location.search}`;
@@ -2224,12 +3054,13 @@ export default function App() {
 
   const PAGE_TITLES = {
     dashboard: { title: 'Operator Dashboard', sub: 'Real-time overview of all donation activity' },
-    request:   { title: 'New Donation Request', sub: 'Submit or upload a blood requisition form' },
-    recent:    { title: 'Recent Requests', sub: 'Browse the latest request statuses and matches' },
-    donors:    { title: 'Donor Management', sub: 'Browse and notify eligible student donors' },
-    logs:      { title: 'Notification Logs', sub: 'WhatsApp outreach status and donor replies' },
-    manager:   { title: 'Manager Login', sub: 'Restricted access for the seeded manager account' },
+    request: { title: 'New Donation Request', sub: 'Submit or upload a blood requisition form' },
+    recent: { title: 'Recent Requests', sub: 'Browse the latest request statuses and matches' },
+    donors: { title: 'Donor Management', sub: 'Browse and notify eligible student donors' },
+    logs: { title: 'Notification Logs', sub: 'WhatsApp outreach status and donor replies' },
+    manager: { title: 'Manager Login', sub: 'Restricted access for the seeded manager account' },
     'add-manager': { title: 'Add Manager', sub: 'Create a new manager Gmail account' },
+    'add-volunteer': { title: 'Add Volunteer', sub: 'Create a new volunteer account' },
   };
 
   const activePage = view === 'manager'
@@ -2261,22 +3092,41 @@ export default function App() {
     setWhatsAppAlertsEnabled(enabled);
   };
 
-  const handleRecordManagerAction = entry => {
-    const nextLog = {
-      id: Date.now(),
-      donor: managerSession?.name || 'Manager',
-      request: entry.request,
-      status: entry.status || 'accepted',
-      time: 'just now',
-      msg: entry.msg,
-    };
-
-    setManagerLogs(current => [nextLog, ...current]);
+  const handleRecordManagerAction = async entry => {
+    try {
+      await fetch('/api/admin/manager-logs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          actor: managerSession?.name || 'Manager',
+          request: entry.request,
+          msg: entry.msg,
+          status: entry.status || 'accepted',
+        }),
+      });
+      await loadManagerLogs();
+    } catch (err) {
+      console.warn('Failed to post manager action log:', err);
+      const nextLog = {
+        id: Date.now(),
+        donor: managerSession?.name || 'Manager',
+        request: entry.request,
+        status: entry.status || 'accepted',
+        time: 'just now',
+        msg: entry.msg,
+      };
+      setManagerLogs(current => [nextLog, ...current]);
+    }
   };
 
   const handleOpenAddManager = () => {
     if (!managerSession) return;
     setView('add-manager');
+  };
+
+  const handleOpenAddVolunteer = () => {
+    if (!managerSession) return;
+    setView('add-volunteer');
   };
 
   const handleBackToDashboard = () => {
@@ -2285,6 +3135,14 @@ export default function App() {
 
   const handleManagerLogout = () => {
     setManagerSession(null);
+  };
+
+  const handleVolunteerLoginSuccess = nextVolunteerSession => {
+    setVolunteerSession(nextVolunteerSession);
+  };
+
+  const handleVolunteerLogout = () => {
+    setVolunteerSession(null);
   };
 
   const [showWhatsAppAdmin, setShowWhatsAppAdmin] = useState(() => {
@@ -2310,7 +3168,7 @@ export default function App() {
         // console.log intentionally left for local debugging
         setShowWhatsAppAdmin(true);
       }
-    } catch (e) {}
+    } catch (e) { }
   }, []);
 
   useEffect(() => {
@@ -2321,6 +3179,15 @@ export default function App() {
 
   if (typeof window !== 'undefined' && pathState.pathname === '/forgot-password') {
     return <ForgotPasswordPage />;
+  }
+
+  if (typeof window !== 'undefined' && pathState.pathname === '/volunteer-forgot-password') {
+    return <VolunteerForgotPasswordPage />;
+  }
+
+  // Gate the entire dashboard behind volunteer login
+  if (!volunteerSession) {
+    return <VolunteerLoginView onLoginSuccess={handleVolunteerLoginSuccess} />;
   }
 
   return (
@@ -2362,6 +3229,13 @@ export default function App() {
           <div className="sidebar-footer">
             <p>🟢 WhatsApp API <strong>Connected</strong><br />Last ping: 12s ago</p>
           </div>
+          <div className="sidebar-volunteer-info">
+            <span className="volunteer-name">👤 {volunteerSession?.name || 'Volunteer'}</span>
+            <span className="volunteer-email">{volunteerSession?.email || ''}</span>
+            <button type="button" className="volunteer-logout-btn" onClick={handleVolunteerLogout}>
+              ← Sign Out
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -2384,25 +3258,28 @@ export default function App() {
 
         <div className={`content-area ${view === 'request' ? 'request-mode' : ''}`}>
           {view === 'dashboard' && <DashboardView donors={donors} requests={requests} onSeeAllNotifications={() => setView('logs')} onSeeAllRequests={() => setView('recent')} onOpenOutreachModal={(donor, request) => { setActiveOutreachDonor(donor); setActiveOutreachRequest(request); }} cooldowns={cooldowns} whatsappEvents={whatsappEvents} />}
-          {view === 'request'   && <RequestView donors={donors} onCreateRequest={handleCreateRequest} />}
-          {view === 'recent'    && <RecentRequestsView requests={requests} donors={donors} onOpenOutreachModal={(donor, request) => { setActiveOutreachDonor(donor); setActiveOutreachRequest(request); }} cooldowns={cooldowns} whatsappEvents={whatsappEvents} />}
-          {view === 'donors' && <DonorsView donors={donors} setDonors={setDonors} sheetMeta={sheetMeta} setSheetMeta={setSheetMeta} whatsappAlertsEnabled={whatsappAlertsEnabled} onOpenOutreachModal={(donor) => { setActiveOutreachDonor(donor); setActiveOutreachRequest(null); }} cooldowns={cooldowns} setCooldowns={setCooldowns} />}
-          {view === 'logs'      && <LogsView managerLogs={managerLogs} whatsappEvents={whatsappEvents} />}
-          {view === 'manager'   && (managerSession
-            ? <ManagerDashboardView managerSession={managerSession} onLogout={handleManagerLogout} onAddManager={handleOpenAddManager} onUpdateSession={handleManagerSessionUpdate} onRecordAction={handleRecordManagerAction} whatsappAlertsEnabled={whatsappAlertsEnabled} onToggleWhatsAppAlerts={handleToggleWhatsAppAlerts} />
+          {view === 'request' && <RequestView donors={donors} onCreateRequest={handleCreateRequest} />}
+          {view === 'recent' && <RecentRequestsView requests={requests} donors={donors} onOpenOutreachModal={(donor, request) => { setActiveOutreachDonor(donor); setActiveOutreachRequest(request); }} cooldowns={cooldowns} whatsappEvents={whatsappEvents} />}
+          {view === 'donors' && <DonorsView donors={donors} setDonors={setDonors} sheetMeta={sheetMeta} setSheetMeta={setSheetMeta} whatsappAlertsEnabled={whatsappAlertsEnabled} onOpenOutreachModal={(donor) => { setActiveOutreachDonor(donor); setActiveOutreachRequest(null); }} cooldowns={cooldowns} setCooldowns={setCooldowns} onRecordAction={handleRecordManagerAction} />}
+          {view === 'logs' && <LogsView managerLogs={managerLogs} whatsappEvents={whatsappEvents} onRefresh={handleRefreshLogs} />}
+          {view === 'manager' && (managerSession
+            ? <ManagerDashboardView managerSession={managerSession} onLogout={handleManagerLogout} onAddManager={handleOpenAddManager} onAddVolunteer={handleOpenAddVolunteer} onUpdateSession={handleManagerSessionUpdate} onRecordAction={handleRecordManagerAction} whatsappAlertsEnabled={whatsappAlertsEnabled} onToggleWhatsAppAlerts={handleToggleWhatsAppAlerts} donors={donors} whatsappEvents={whatsappEvents} onOpenWhatsAppAdmin={() => setShowWhatsAppAdmin(true)} />
             : <ManagerLoginView managerSession={managerSession} onLoginSuccess={handleManagerLoginSuccess} />
           )}
           {view === 'add-manager' && managerSession && (
-            <ManagerAddAccountView managerSession={managerSession} onLogout={handleManagerLogout} onBackToDashboard={handleBackToDashboard} />
+            <ManagerAddAccountView managerSession={managerSession} onLogout={handleManagerLogout} onBackToDashboard={handleBackToDashboard} onRecordAction={handleRecordManagerAction} />
+          )}
+          {view === 'add-volunteer' && managerSession && (
+            <VolunteerAddAccountView managerSession={managerSession} onLogout={handleManagerLogout} onBackToDashboard={handleBackToDashboard} onRecordAction={handleRecordManagerAction} />
           )}
         </div>
         <WhatsAppAdminPanel open={showWhatsAppAdmin} onClose={() => setShowWhatsAppAdmin(false)} />
-        <WhatsAppAlertModal 
-          open={activeOutreachDonor !== null} 
-          onClose={() => { setActiveOutreachDonor(null); setActiveOutreachRequest(null); }} 
-          donor={activeOutreachDonor} 
+        <WhatsAppAlertModal
+          open={activeOutreachDonor !== null}
+          onClose={() => { setActiveOutreachDonor(null); setActiveOutreachRequest(null); }}
+          donor={activeOutreachDonor}
           initialRequest={activeOutreachRequest}
-          requests={requests} 
+          requests={requests}
           onSend={async (donor, message, tName, tLang, tParams, reqId) => {
             const result = await sendDonorWhatsAppAlert(donor, message, tName, tLang, tParams, reqId);
             setDonors(currentDonors => currentDonors.map(d => (d.id === donor.id ? { ...d, notified: true } : d)));
@@ -2411,7 +3288,7 @@ export default function App() {
             await loadEvents();
             alert(result.message || `WhatsApp alert sent successfully to ${donor.name || 'Donor'}!`);
             return result;
-          }} 
+          }}
         />
       </div>
     </div>

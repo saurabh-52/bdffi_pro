@@ -538,6 +538,207 @@ async function sendManagerWelcomeEmail(email, name, tempPassword) {
   return { sent: false, tempPassword };
 }
 
+// ── Volunteer table & utility functions ─────────────────────
+
+async function ensureVolunteersTable() {
+  const hasTable = await db.schema.hasTable('volunteers');
+
+  if (!hasTable) {
+    await db.schema.createTable('volunteers', function(table) {
+      table.increments('id').primary();
+      table.string('name', 120).notNullable();
+      table.string('email', 255).notNullable().unique();
+      table.string('password', 120).notNullable().defaultTo('FFI-Volunteer-1234');
+      table.boolean('is_active').notNullable().defaultTo(true);
+      table.string('reset_token', 128).nullable();
+      table.timestamp('reset_expires').nullable();
+      table.timestamp('created_at').defaultTo(db.fn.now());
+      table.timestamp('updated_at').defaultTo(db.fn.now());
+    });
+  } else {
+    if (!(await db.schema.hasColumn('volunteers', 'reset_token'))) {
+      await db.schema.alterTable('volunteers', function(table) {
+        table.string('reset_token', 128).nullable();
+      });
+    }
+    if (!(await db.schema.hasColumn('volunteers', 'reset_expires'))) {
+      await db.schema.alterTable('volunteers', function(table) {
+        table.timestamp('reset_expires').nullable();
+      });
+    }
+  }
+
+  // Seed default volunteer with super admin credentials
+  const defaultEmail = PRIMARY_MANAGER.gmail;
+  const existing = await db('volunteers').whereRaw('LOWER(email) = ?', [defaultEmail]).first();
+  if (!existing) {
+    await db('volunteers').insert({
+      name: PRIMARY_MANAGER.name,
+      email: defaultEmail,
+      password: PRIMARY_MANAGER.password,
+      is_active: true,
+      created_at: db.fn.now(),
+      updated_at: db.fn.now(),
+    });
+  }
+}
+
+function serializeVolunteer(volunteer) {
+  if (!volunteer) return null;
+  return {
+    id: volunteer.id,
+    name: volunteer.name,
+    email: volunteer.email,
+    is_active: isActiveFlag(volunteer.is_active),
+    created_at: volunteer.created_at || null,
+    updated_at: volunteer.updated_at || null,
+  };
+}
+
+async function readVolunteerByEmail(email) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) return null;
+
+  await ensureVolunteersTable();
+
+  try {
+    return await db('volunteers').whereRaw('LOWER(email) = ?', [normalizedEmail]).first();
+  } catch (error) {
+    return null;
+  }
+}
+
+async function createVolunteerAccount({ name, email, password }) {
+  await ensureVolunteersTable();
+
+  const tempPassword = String(password || '').trim() || crypto.randomBytes(6).toString('base64url');
+
+  const [createdId] = await db('volunteers').insert({
+    name: String(name || '').trim(),
+    email: String(email || '').trim().toLowerCase(),
+    password: tempPassword,
+    is_active: true,
+    created_at: db.fn.now(),
+    updated_at: db.fn.now(),
+  });
+
+  return {
+    id: createdId,
+    name: String(name || '').trim(),
+    email: String(email || '').trim().toLowerCase(),
+    password: tempPassword,
+    is_active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+}
+
+async function sendVolunteerWelcomeEmail(email, name, token) {
+  const transporter = makeTransporter();
+  const activationUrl = `${process.env.APP_URL || 'http://localhost:5173'}/volunteer-forgot-password?token=${encodeURIComponent(token)}`;
+  const subject = 'Activate your Fast Forward India volunteer account';
+  const text = `Hello ${name},\n\nYour volunteer account has been created.\n\nTo set your password and activate your account, please use the link below (valid for 7 days):\n\nLink: ${activationUrl}\n\nUse your email address and the password you set to sign in.`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111">
+      <h2 style="margin:0 0 12px">Activate your Fast Forward India volunteer account</h2>
+      <p>Hello ${name},</p>
+      <p>Your volunteer account has been created.</p>
+      <p><a href="${activationUrl}" style="display:inline-block;background:#0f766e;color:#fff;text-decoration:none;padding:10px 16px;border-radius:6px;font-weight:700">Set Password & Activate</a></p>
+      <p>Use your email address and the password you set to sign in.</p>
+      <p style="color:#666;font-size:0.85em">This link is valid for 7 days.</p>
+    </div>
+  `;
+
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from: process.env.FROM_EMAIL || process.env.SMTP_USER || 'no-reply@fastforwardindia.org',
+        to: email,
+        subject,
+        text,
+        html,
+        replyTo: process.env.FROM_EMAIL || process.env.SMTP_USER || 'no-reply@fastforwardindia.org',
+      });
+      return { sent: true };
+    } catch (error) {
+      console.warn('Failed to send volunteer welcome email:', error && error.message);
+    }
+  }
+
+  console.log('Volunteer welcome email fallback for', email, { activationUrl, token });
+  return { sent: false, token };
+}
+
+async function sendManagerPromotionEmail(email, name) {
+  const transporter = makeTransporter();
+  const loginUrl = `${process.env.APP_URL || 'http://localhost:5173'}/?view=manager`;
+  const subject = 'You have been promoted to Manager - Fast Forward India';
+  const text = `Hello ${name},\n\nYou have been promoted to a Manager account on the Fast Forward India Blood Donation portal.\n\nUse your existing volunteer credentials to log in to the Manager portal:\n${loginUrl}\n\nNo separate credentials are required.`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111">
+      <h2 style="margin:0 0 12px">You have been promoted to Manager</h2>
+      <p>Hello ${name},</p>
+      <p>You have been promoted to a Manager account on the Fast Forward India Blood Donation portal.</p>
+      <p><a href="${loginUrl}" style="display:inline-block;background:#0f766e;color:#fff;text-decoration:none;padding:10px 16px;border-radius:6px;font-weight:700">Open manager login</a></p>
+      <p>Please use your existing volunteer email and password to sign in. No separate credentials are required.</p>
+    </div>
+  `;
+
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from: process.env.FROM_EMAIL || process.env.SMTP_USER || 'no-reply@fastforwardindia.org',
+        to: email,
+        subject,
+        text,
+        html,
+        replyTo: process.env.FROM_EMAIL || process.env.SMTP_USER || 'no-reply@fastforwardindia.org',
+      });
+      return { sent: true };
+    } catch (error) {
+      console.warn('Failed to send manager promotion email:', error && error.message);
+    }
+  }
+
+  console.log('Manager promotion email fallback for', email, { loginUrl });
+  return { sent: false };
+}
+
+async function sendVolunteerResetEmail(email, token) {
+  const transporter = makeTransporter();
+  const resetUrl = `${process.env.APP_URL || 'http://localhost:5173'}/volunteer-forgot-password?token=${encodeURIComponent(token)}`;
+
+  const subject = 'Reset your Fast Forward India volunteer password';
+  const text = `A password reset was requested for this account. Use the link below to reset your password:\n\nLink: ${resetUrl}\n\nIf you did not request this, ignore this message.`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111">
+      <h2 style="margin:0 0 12px">Reset your Fast Forward India volunteer password</h2>
+      <p>A password reset was requested for this account.</p>
+      <p><a href="${resetUrl}" style="display:inline-block;background:#0f766e;color:#fff;text-decoration:none;padding:10px 16px;border-radius:6px;font-weight:700">Open reset link</a></p>
+      <p>If you did not request this, you can ignore this email.</p>
+    </div>
+  `;
+
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from: process.env.FROM_EMAIL || process.env.SMTP_USER || 'no-reply@fastforwardindia.org',
+        to: email,
+        subject,
+        text,
+        html,
+        replyTo: process.env.FROM_EMAIL || process.env.SMTP_USER || 'no-reply@fastforwardindia.org',
+      });
+      return { sent: true };
+    } catch (err) {
+      console.warn('Failed to send volunteer reset email:', err && err.message);
+    }
+  }
+
+  console.log('Volunteer password reset token for', email, token, 'reset link:', resetUrl);
+  return { sent: false, token };
+}
+
 function normalizeDonor(row, index) {
   const rawMobile = String(row.mobile || row.phone || row.mobile_no || '').trim();
   const mobileDigits = rawMobile.replace(/\D+/g, '');
@@ -1070,13 +1271,7 @@ app.get('/api/managers', async (_request, response) => {
 
 app.post('/api/managers', async (request, response) => {
   try {
-    const name = String(request.body?.name || '').trim();
     const gmail = String(request.body?.gmail || request.body?.email || '').trim().toLowerCase();
-    const providedPassword = String(request.body?.password || '').trim();
-
-    if (!name) {
-      return response.status(400).json({ message: 'name is required.' });
-    }
 
     if (!gmail) {
       return response.status(400).json({ message: 'gmail is required.' });
@@ -1086,25 +1281,72 @@ app.post('/api/managers', async (request, response) => {
       return response.status(400).json({ message: 'gmail must be a valid email address.' });
     }
 
+    // 1. Verify that the volunteer exists
+    const volunteer = await readVolunteerByEmail(gmail);
+    if (!volunteer) {
+      return response.status(400).json({ message: `Only existing volunteers can be promoted to managers. No volunteer found with email: ${gmail}` });
+    }
+
+    // 2. Check if already a manager
     const existingManager = await readManagerByEmail(gmail);
     if (existingManager) {
-      return response.status(409).json({ message: 'A manager with that gmail already exists.' });
+      if (isActiveFlag(existingManager.is_active)) {
+        return response.status(409).json({ message: 'This volunteer is already an active manager.' });
+      } else {
+        // Reactivate inactive manager
+        await db('managers').where('id', existingManager.id).update({ is_active: true, updated_at: db.fn.now() });
+        await sendManagerPromotionEmail(gmail, volunteer.name);
+        
+        const updatedManager = await readManagerByEmail(gmail);
+        const payload = serializeManager(updatedManager);
+        payload.message = 'Manager account reactivated successfully.';
+        payload.promoted = true;
+        return response.json(payload);
+      }
     }
 
-    const tempPassword = providedPassword || generateTemporaryPassword();
-    const createdManager = await createManagerAccount({ name, gmail, password: tempPassword });
-    const mailResult = await sendManagerWelcomeEmail(gmail, name, tempPassword);
+    // 3. Promote volunteer to manager
+    const createdManager = await createManagerAccount({ 
+      name: volunteer.name, 
+      gmail, 
+      password: volunteer.password 
+    });
+    
+    const mailResult = await sendManagerPromotionEmail(gmail, volunteer.name);
 
     const payload = serializeManager(createdManager);
-    payload.message = 'Manager account created successfully.';
-    if (process.env.SHOW_RESET_TOKEN === 'true' || !mailResult.sent) {
-      payload.tempPassword = tempPassword;
-      payload.loginUrl = `${process.env.APP_URL || 'http://localhost:5173'}/?view=manager`;
-    }
+    payload.message = 'Volunteer promoted to Manager successfully.';
+    payload.promoted = true;
 
     response.status(201).json(payload);
   } catch (error) {
-    response.status(500).json({ message: 'Failed to create manager account.' });
+    response.status(500).json({ message: 'Failed to promote volunteer to manager.' });
+  }
+});
+
+app.delete('/api/managers/:id', async (request, response) => {
+  try {
+    await ensureManagersTable();
+    const managerId = Number(request.params.id);
+
+    if (!Number.isInteger(managerId) || managerId <= 0) {
+      return response.status(400).json({ message: 'manager id is required.' });
+    }
+
+    const manager = await db('managers').where('id', managerId).first();
+    if (!manager) {
+      return response.status(404).json({ message: 'Manager not found.' });
+    }
+
+    if (manager.is_primary) {
+      return response.status(400).json({ message: 'Primary manager cannot be demoted.' });
+    }
+
+    await db('managers').where('id', managerId).del();
+
+    return response.json({ message: `Manager account ${manager.name} (${manager.gmail}) successfully demoted to Volunteer.` });
+  } catch (error) {
+    return response.status(500).json({ message: 'Failed to demote manager account.' });
   }
 });
 
@@ -1203,8 +1445,13 @@ app.post('/api/manager/login', async (request, response) => {
     }
 
     const manager = await readManagerByEmail(email);
+    if (!manager) {
+      return response.status(401).json({ message: 'Invalid manager email or password.' });
+    }
 
-    if (!manager || String(manager.password || '') !== password) {
+    // Authenticate using matching volunteer credentials
+    const volunteer = await readVolunteerByEmail(email);
+    if (!volunteer || String(volunteer.password || '') !== password) {
       return response.status(401).json({ message: 'Invalid manager email or password.' });
     }
 
@@ -1365,6 +1612,20 @@ app.post('/api/manager/forgot/confirm', async (request, response) => {
       // ignore DB error
     }
 
+    // Sync to volunteer table as well
+    try {
+      const emailToSync = (manager.gmail || manager.email || '').toLowerCase();
+      if (emailToSync) {
+        await ensureVolunteersTable();
+        await db('volunteers').whereRaw('LOWER(email) = ?', [emailToSync]).update({
+          password: newPassword,
+          updated_at: db.fn.now()
+        });
+      }
+    } catch (volErr) {
+      console.warn('Failed to sync manager password reset to volunteer:', volErr.message);
+    }
+
     try {
       await writeManagerStore({
         ...(manager || PRIMARY_MANAGER),
@@ -1381,6 +1642,199 @@ app.post('/api/manager/forgot/confirm', async (request, response) => {
     return response.json({ message: 'Password has been reset. You can now sign in with the new password.' });
   } catch (error) {
     return response.status(500).json({ message: 'Failed to confirm password reset.' });
+  }
+});
+
+// ── Volunteer API routes ────────────────────────────────────
+
+app.post('/api/volunteer/login', async (request, response) => {
+  try {
+    const email = String(request.body?.email || request.body?.id || '').trim().toLowerCase();
+    const password = String(request.body?.password || '').trim();
+
+    if (!email) return response.status(400).json({ message: 'email is required.' });
+    if (!/\S+@\S+\.\S+/.test(email)) return response.status(400).json({ message: 'email must be a valid email address.' });
+    if (!password) return response.status(400).json({ message: 'password is required.' });
+
+    const volunteer = await readVolunteerByEmail(email);
+
+    if (!volunteer || String(volunteer.password || '') !== password) {
+      return response.status(401).json({ message: 'Invalid email or password.' });
+    }
+
+    if (!isActiveFlag(volunteer.is_active)) {
+      return response.status(423).json({ message: 'Your account is deactivated. Contact a manager.', inactive: true });
+    }
+
+    response.json(serializeVolunteer(volunteer));
+  } catch (error) {
+    response.status(500).json({ message: 'Login failed.' });
+  }
+});
+
+app.post('/api/volunteer/forgot/request', async (request, response) => {
+  try {
+    const email = String(request.body?.email || '').trim().toLowerCase();
+    if (!email) return response.status(400).json({ message: 'email is required.' });
+    if (!/\S+@\S+\.\S+/.test(email)) return response.status(400).json({ message: 'email must be a valid email address.' });
+
+    const volunteer = await readVolunteerByEmail(email);
+    if (!volunteer) {
+      return response.json({ message: 'If the email matches a volunteer account, a reset link has been sent.' });
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const expires = new Date(Date.now() + 1000 * 60 * 60); // 1 hour
+
+    try {
+      await db('volunteers').where('id', volunteer.id).update({ reset_token: token, reset_expires: expires });
+    } catch (err) {
+      // ignore DB errors
+    }
+
+    const result = await sendVolunteerResetEmail(email, token);
+
+    const resp = { message: 'If the email matches a volunteer account, a reset link has been sent.' };
+    if (process.env.SHOW_RESET_TOKEN === 'true' || !result.sent) {
+      resp.token = result.token || token;
+    }
+
+    return response.json(resp);
+  } catch (error) {
+    return response.status(500).json({ message: 'Failed to request password reset.' });
+  }
+});
+
+app.post('/api/volunteer/forgot/confirm', async (request, response) => {
+  try {
+    const token = String(request.body?.token || '').trim();
+    const newPassword = String(request.body?.password || '').trim();
+
+    if (!token) return response.status(400).json({ message: 'token is required.' });
+    if (!newPassword) return response.status(400).json({ message: 'password is required.' });
+
+    await ensureVolunteersTable();
+    let volunteer = null;
+    try {
+      volunteer = await db('volunteers').where('reset_token', token).andWhere('reset_expires', '>', db.fn.now()).first();
+    } catch (err) {
+      // ignore DB errors
+    }
+
+    if (!volunteer) return response.status(400).json({ message: 'Invalid or expired token.' });
+
+    try {
+      await db('volunteers').where('id', volunteer.id).update({ password: newPassword, reset_token: null, reset_expires: null, updated_at: db.fn.now() });
+    } catch (err) {
+      // ignore DB errors
+    }
+
+    return response.json({ message: 'Password has been reset. You can now sign in with the new password.' });
+  } catch (error) {
+    return response.status(500).json({ message: 'Failed to confirm password reset.' });
+  }
+});
+
+app.post('/api/volunteers', async (request, response) => {
+  try {
+    const name = String(request.body?.name || '').trim();
+    const email = String(request.body?.email || request.body?.gmail || '').trim().toLowerCase();
+
+    if (!name) return response.status(400).json({ message: 'name is required.' });
+    if (!email) return response.status(400).json({ message: 'email is required.' });
+    if (!/\S+@\S+\.\S+/.test(email)) return response.status(400).json({ message: 'email must be a valid email address.' });
+
+    const existing = await readVolunteerByEmail(email);
+    if (existing) return response.status(409).json({ message: 'A volunteer with that email already exists.' });
+
+    const randomPassword = crypto.randomBytes(32).toString('hex');
+    const createdVolunteer = await createVolunteerAccount({ name, email, password: randomPassword });
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+    await db('volunteers').where('id', createdVolunteer.id).update({
+      reset_token: token,
+      reset_expires: expires
+    });
+
+    const mailResult = await sendVolunteerWelcomeEmail(email, name, token);
+
+    const payload = serializeVolunteer(createdVolunteer);
+    payload.message = 'Volunteer account created successfully.';
+    if (process.env.SHOW_RESET_TOKEN === 'true' || !mailResult.sent) {
+      payload.activationUrl = `${process.env.APP_URL || 'http://localhost:5173'}/volunteer-forgot-password?token=${encodeURIComponent(token)}`;
+    }
+
+    response.status(201).json(payload);
+  } catch (error) {
+    response.status(500).json({ message: 'Failed to create volunteer account.' });
+  }
+});
+
+app.get('/api/volunteers', async (_request, response) => {
+  try {
+    await ensureVolunteersTable();
+    const volunteers = await db('volunteers').orderBy('created_at', 'asc');
+    response.json(volunteers.map(serializeVolunteer));
+  } catch (error) {
+    response.status(500).json({ message: 'Failed to load volunteer accounts.' });
+  }
+});
+
+async function ensureManagerLogsTable() {
+  try {
+    const has = await db.schema.hasTable('manager_logs');
+    if (!has) {
+      await db.schema.createTable('manager_logs', function(table) {
+        table.increments('id').primary();
+        table.string('actor', 200).notNullable();
+        table.string('request', 255).notNullable();
+        table.text('msg').notNullable();
+        table.string('status', 32).notNullable().defaultTo('accepted');
+        table.timestamp('created_at').defaultTo(db.fn.now());
+      });
+
+      const seedLogs = [
+        { actor: 'Manager', request: 'Imported donor sheet', status: 'accepted', msg: 'Active Excel sheet replaced and saved to backend.', created_at: new Date(Date.now() - 5 * 60 * 1000) },
+        { actor: 'Manager', request: 'Deleted donor sheet', status: 'declined', msg: 'Current active sheet was cleared from backend storage.', created_at: new Date(Date.now() - 18 * 60 * 1000) },
+        { actor: 'Manager', request: 'Updated donor source', status: 'sent', msg: 'Fresh donor sheet synchronized for all users.', created_at: new Date(Date.now() - 60 * 60 * 1000) },
+        { actor: 'Manager', request: 'Opened sheet preview', status: 'pending', msg: 'Viewed the active donor sheet before export.', created_at: new Date(Date.now() - 2 * 60 * 60 * 1000) },
+      ];
+      await db('manager_logs').insert(seedLogs);
+    }
+  } catch (err) {
+    console.error('Failed to ensure manager_logs table:', err.message);
+  }
+}
+
+app.get('/api/admin/manager-logs', async (_req, res) => {
+  try {
+    await ensureManagerLogsTable();
+    const logs = await db('manager_logs').orderBy('created_at', 'desc').limit(200);
+    return res.json({ ok: true, logs });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/admin/manager-logs', async (req, res) => {
+  try {
+    const { actor, request, msg, status } = req.body;
+    if (!request || !msg) {
+      return res.status(400).json({ ok: false, error: 'request and msg are required' });
+    }
+    await ensureManagerLogsTable();
+    await db('manager_logs').insert({
+      actor: actor || 'Manager',
+      request,
+      msg,
+      status: status || 'accepted',
+      created_at: db.fn.now(),
+    });
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
