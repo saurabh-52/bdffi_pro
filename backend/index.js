@@ -838,6 +838,7 @@ app.post('/api/whatsapp/alerts/send', async (request, response) => {
       await ensureWhatsAppEventsTable();
       const messageId = result.payload?.messages?.[0]?.id || null;
       const status = result.ok ? 'sent' : 'failed';
+      const sender = request.body?.sender || null;
       const event = {
         request_id: requestId,
         student_name: donor.name || null,
@@ -846,7 +847,15 @@ app.post('/api/whatsapp/alerts/send', async (request, response) => {
         message_id: messageId,
         attempt_count: 1,
         last_error: result.ok ? null : (result.error || null),
-        meta: toJsonText(result.payload),
+        meta: toJsonText({
+          request: {
+            templateName,
+            templateLanguageCode,
+            templateParams,
+          },
+          response: result.payload,
+          sender,
+        }),
       };
 
       const [insertedId] = await db('whatsapp_events').insert(event);
@@ -924,7 +933,10 @@ app.get('/api/admin/whatsapp/status', async (_req, res) => {
 app.get('/api/admin/whatsapp/events', async (_req, res) => {
   try {
     await ensureWhatsAppEventsTable();
-    const events = await db('whatsapp_events').orderBy('created_at', 'desc').limit(200);
+    const events = await db('whatsapp_events')
+      .whereNot('status', 'received')
+      .orderBy('created_at', 'desc')
+      .limit(200);
     return res.json({ ok: true, events });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
@@ -944,22 +956,53 @@ app.post('/api/admin/whatsapp/events/:id/retry', async (req, res) => {
     const phone = normalizePhoneNumber(ev.student_phone);
     if (!phone) return res.status(400).json({ message: 'Invalid phone on event' });
 
-    const result = await sendMetaWhatsAppTemplateMessage({ to: phone });
+    let templateName = undefined;
+    let templateLanguageCode = undefined;
+    let templateParams = [];
+
+    if (ev.meta) {
+      try {
+        const metaObj = typeof ev.meta === 'string' ? JSON.parse(ev.meta) : ev.meta;
+        if (metaObj?.request) {
+          templateName = metaObj.request.templateName;
+          templateLanguageCode = metaObj.request.templateLanguageCode;
+          templateParams = metaObj.request.templateParams;
+        }
+      } catch (err) {
+        // ignore parsing error
+      }
+    }
+
+    const result = await sendMetaWhatsAppTemplateMessage({
+      to: phone,
+      templateName,
+      templateLanguageCode,
+      templateParams,
+    });
 
     const updates = {
       attempt_count: Number(ev.attempt_count || 0) + 1,
       updated_at: db.fn.now(),
     };
 
+    const nextMeta = {
+      request: {
+        templateName,
+        templateLanguageCode,
+        templateParams,
+      },
+      response: result.payload,
+    };
+
     if (result.ok) {
       updates.status = 'sent';
       updates.message_id = result.payload?.messages?.[0]?.id || ev.message_id;
       updates.last_error = null;
-      updates.meta = toJsonText(result.payload);
+      updates.meta = toJsonText(nextMeta);
     } else {
       updates.status = 'failed';
       updates.last_error = result.error || null;
-      updates.meta = toJsonText(result.payload);
+      updates.meta = toJsonText(nextMeta);
     }
 
     await db('whatsapp_events').where('id', id).update(updates);
@@ -1143,9 +1186,9 @@ app.post('/api/meta/whatsapp/webhook', (request, response) => {
                   }
                 } else if (msg.type === 'text') {
                   const txt = String(msg.text?.body || '').trim().toUpperCase();
-                  if (txt === 'YES') {
+                  if (txt === 'YES' || txt.startsWith('YES') || txt.includes('YES')) {
                     userChoice = 'Yes';
-                  } else if (txt === 'NO') {
+                  } else if (txt === 'NO' || txt.startsWith('NO') || txt.includes('NO')) {
                     userChoice = 'No';
                   }
                 }
@@ -1154,6 +1197,7 @@ app.post('/api/meta/whatsapp/webhook', (request, response) => {
                 if (userChoice) {
                   const latestEvent = await db('whatsapp_events')
                     .where('student_phone', from)
+                    .whereNot('status', 'received')
                     .orderBy('created_at', 'desc')
                     .first();
                   
@@ -1161,7 +1205,21 @@ app.post('/api/meta/whatsapp/webhook', (request, response) => {
                     const diffMs = Date.now() - new Date(latestEvent.created_at).getTime();
                     const hours24 = 24 * 60 * 60 * 1000;
                     
-                    if (diffMs <= hours24) {
+                     if (diffMs <= hours24) {
+                      // Bouncer check: Only consider the first reply to buttons and ignore duplicate submissions.
+                      if (latestEvent.response !== null && latestEvent.response !== '') {
+                        const isFinal = latestEvent.status === 'accepted' || 
+                                        latestEvent.response === 'No - Other' || 
+                                        latestEvent.response.startsWith('No - Donated Recently (');
+                        
+                        const isInitialButton = msg.type === 'button' || msg.type === 'text';
+                        
+                        if (isInitialButton || isFinal) {
+                          console.log(`Bouncer: Ignoring duplicate response from ${from} for event ${latestEvent.id}. Current response: ${latestEvent.response}`);
+                          continue;
+                        }
+                      }
+
                       let nextResponse = userChoice;
                       
                       // Format response for display
