@@ -28,7 +28,7 @@ async function ensureStorageFile() {
     await fs.access(sheetFilePath);
   } catch {
     await fs.mkdir(storageDir, { recursive: true });
-    await fs.writeFile(sheetFilePath, JSON.stringify({ sheetMeta: null, donors: [] }, null, 2), 'utf8');
+    await fs.writeFile(sheetFilePath, JSON.stringify({ sheetMeta: null, donors: [], blockedFilters: { admissionPrefixes: [], programmes: [] } }, null, 2), 'utf8');
   }
 }
 
@@ -339,6 +339,37 @@ async function ensureManagersTable() {
       });
     }
   }
+
+  // Seed fake managers — only if no fake managers have ever been added
+  const managerCount = await db('managers').count('* as cnt').first();
+  if (managerCount && Number(managerCount.cnt) <= 1) {
+    const FAKE_MANAGERS = [
+      { name: 'Aarav Sharma', gmail: 'aarav.sharma@fastforwardindia.org', password: 'FFI-Manager-1234', is_primary: false, is_active: true },
+      { name: 'Diya Patel', gmail: 'diya.patel@fastforwardindia.org', password: 'FFI-Manager-1234', is_primary: false, is_active: true },
+      { name: 'Karan Malhotra', gmail: 'karan.malhotra@fastforwardindia.org', password: 'FFI-Manager-1234', is_primary: false, is_active: true },
+      { name: 'Ananya Iyer', gmail: 'ananya.iyer@fastforwardindia.org', password: 'FFI-Manager-1234', is_primary: false, is_active: false },
+      { name: 'Rohan Gupta', gmail: 'rohan.gupta@fastforwardindia.org', password: 'FFI-Manager-1234', is_primary: false, is_active: true },
+      { name: 'Neha Verma', gmail: 'neha.verma@fastforwardindia.org', password: 'FFI-Manager-1234', is_primary: false, is_active: true },
+      { name: 'Aditya Rao', gmail: 'aditya.rao@fastforwardindia.org', password: 'FFI-Manager-1234', is_primary: false, is_active: false },
+      { name: 'Sneha Reddy', gmail: 'sneha.reddy@fastforwardindia.org', password: 'FFI-Manager-1234', is_primary: false, is_active: true }
+    ];
+
+    for (const m of FAKE_MANAGERS) {
+      const existingM = await db('managers').whereRaw('LOWER(gmail) = ?', [m.gmail.toLowerCase()]).first();
+      if (!existingM) {
+        await db('managers').insert({
+          name: m.name,
+          gmail: m.gmail.toLowerCase(),
+          password: m.password,
+          is_primary: m.is_primary,
+          is_active: m.is_active,
+          whatsapp_alerts_enabled: true,
+          created_at: db.fn.now(),
+          updated_at: db.fn.now()
+        });
+      }
+    }
+  }
 }
 
 async function ensureWhatsAppEventsTable() {
@@ -581,6 +612,37 @@ async function ensureVolunteersTable() {
       updated_at: db.fn.now(),
     });
   }
+
+  // Seed fake volunteers — only if no fake volunteers have ever been added
+  const volunteerCount = await db('volunteers').count('* as cnt').first();
+  if (Number(volunteerCount.cnt) <= 1) {
+    const FAKE_VOLUNTEERS = [
+      { name: 'Aarav Sharma', email: 'aarav.sharma@fastforwardindia.org', password: 'FFI-Volunteer-1234', is_active: true },
+      { name: 'Diya Patel', email: 'diya.patel@fastforwardindia.org', password: 'FFI-Volunteer-1234', is_active: true },
+      { name: 'Ishaan Sen', email: 'ishaan.sen@fastforwardindia.org', password: 'FFI-Volunteer-1234', is_active: true },
+      { name: 'Kabir Kapoor', email: 'kabir.kapoor@fastforwardindia.org', password: 'FFI-Volunteer-1234', is_active: true },
+      { name: 'Meera Nair', email: 'meera.nair@fastforwardindia.org', password: 'FFI-Volunteer-1234', is_active: true },
+      { name: 'Rohan Gupta', email: 'rohan.gupta@fastforwardindia.org', password: 'FFI-Volunteer-1234', is_active: true },
+      { name: 'Sneha Reddy', email: 'sneha.reddy@fastforwardindia.org', password: 'FFI-Volunteer-1234', is_active: true },
+      { name: 'Vikram Joshi', email: 'vikram.joshi@fastforwardindia.org', password: 'FFI-Volunteer-1234', is_active: true },
+      { name: 'Pooja Bhatia', email: 'pooja.bhatia@fastforwardindia.org', password: 'FFI-Volunteer-1234', is_active: true },
+      { name: 'Arjun Verma', email: 'arjun.verma@fastforwardindia.org', password: 'FFI-Volunteer-1234', is_active: true }
+    ];
+
+    for (const v of FAKE_VOLUNTEERS) {
+      const existingV = await db('volunteers').whereRaw('LOWER(email) = ?', [v.email.toLowerCase()]).first();
+      if (!existingV) {
+        await db('volunteers').insert({
+          name: v.name,
+          email: v.email.toLowerCase(),
+          password: v.password,
+          is_active: v.is_active,
+          created_at: db.fn.now(),
+          updated_at: db.fn.now()
+        });
+      }
+    }
+  }
 }
 
 function serializeVolunteer(volunteer) {
@@ -667,6 +729,41 @@ async function sendVolunteerWelcomeEmail(email, name, token) {
 
   console.log('Volunteer welcome email fallback for', email, { activationUrl, token });
   return { sent: false, token };
+}
+
+async function sendVolunteerRemovalEmail(email, name) {
+  const transporter = makeTransporter();
+  const subject = 'Your Fast Forward India volunteer account has been removed';
+  const text = `Hello ${name},\n\nWe would like to inform you that your volunteer account associated with this email has been removed by a manager.\n\nThank you for your service and support.\n\nBest regards,\nFast Forward India team`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111">
+      <h2 style="margin:0 0 12px">Volunteer Account Removed</h2>
+      <p>Hello ${name},</p>
+      <p>We would like to inform you that your volunteer account associated with this email has been removed by a manager.</p>
+      <p>Thank you for your service and support.</p>
+      <hr style="border:none;border-top:1px solid #ddd;margin:20px 0" />
+      <p style="color:#666;font-size:0.85em">Best regards,<br/>Fast Forward India team</p>
+    </div>
+  `;
+
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from: process.env.FROM_EMAIL || process.env.SMTP_USER || 'no-reply@fastforwardindia.org',
+        to: email,
+        subject,
+        text,
+        html,
+        replyTo: process.env.FROM_EMAIL || process.env.SMTP_USER || 'no-reply@fastforwardindia.org',
+      });
+      return { sent: true };
+    } catch (error) {
+      console.warn('Failed to send volunteer removal email:', error && error.message);
+    }
+  }
+
+  console.log('Volunteer removal email fallback for', email);
+  return { sent: false };
 }
 
 async function sendManagerPromotionEmail(email, name) {
@@ -761,6 +858,9 @@ function normalizeDonor(row, index) {
 app.get('/api/donors', async (_request, response) => {
   try {
     const store = await readSheetStore();
+    if (!store.blockedFilters) {
+      store.blockedFilters = { admissionPrefixes: [], programmes: [] };
+    }
     response.json(store);
   } catch (error) {
     response.status(500).json({ message: 'Failed to read donor sheet storage.' });
@@ -775,6 +875,7 @@ app.post('/api/donors/import', async (request, response) => {
       return response.status(400).json({ message: 'donors must be an array.' });
     }
 
+    const store = await readSheetStore();
     const normalizedDonors = donors.map((row, index) => normalizeDonor(row, index));
     const nextStore = {
       sheetMeta: sheetMeta ? {
@@ -783,6 +884,7 @@ app.post('/api/donors/import', async (request, response) => {
         importedAt: sheetMeta.importedAt || new Date().toISOString(),
       } : null,
       donors: normalizedDonors,
+      blockedFilters: store.blockedFilters || { admissionPrefixes: [], programmes: [] }
     };
 
     await writeSheetStore(nextStore);
@@ -794,11 +896,28 @@ app.post('/api/donors/import', async (request, response) => {
 
 app.delete('/api/donors', async (_request, response) => {
   try {
-    const nextStore = { sheetMeta: null, donors: [] };
+    const store = await readSheetStore();
+    const nextStore = { 
+      sheetMeta: null, 
+      donors: [], 
+      blockedFilters: store.blockedFilters || { admissionPrefixes: [], programmes: [] } 
+    };
     await writeSheetStore(nextStore);
     response.json(nextStore);
   } catch (error) {
     response.status(500).json({ message: 'Failed to delete donor sheet.' });
+  }
+});
+
+app.post('/api/donors/block-filters', async (request, response) => {
+  try {
+    const { blockedFilters } = request.body || {};
+    const store = await readSheetStore();
+    store.blockedFilters = blockedFilters || { admissionPrefixes: [], programmes: [] };
+    await writeSheetStore(store);
+    response.json({ ok: true, blockedFilters: store.blockedFilters });
+  } catch (error) {
+    response.status(500).json({ message: 'Failed to update block filters.' });
   }
 });
 
@@ -1840,6 +1959,40 @@ app.get('/api/volunteers', async (_request, response) => {
   }
 });
 
+app.delete('/api/volunteers/:id', async (request, response) => {
+  try {
+    const { id } = request.params;
+    const actorEmail = request.query?.actorEmail || 'Manager';
+    const actorName = request.query?.actorName || 'Manager';
+
+    await ensureVolunteersTable();
+    const volunteer = await db('volunteers').where('id', id).first();
+    if (!volunteer) {
+      return response.status(404).json({ message: 'Volunteer account not found.' });
+    }
+
+    await db('volunteers').where('id', id).del();
+
+    // Send email notification to volunteer
+    await sendVolunteerRemovalEmail(volunteer.email, volunteer.name);
+
+    // Record this incident in admin action notification logs (manager_logs)
+    await ensureManagerLogsTable();
+    await db('manager_logs').insert({
+      actor: actorName,
+      request: 'Removed Volunteer',
+      msg: `Volunteer ${volunteer.name} (${volunteer.email}) was removed by Manager ${actorName} (${actorEmail}).`,
+      status: 'declined',
+      created_at: db.fn.now(),
+    });
+
+    response.json({ message: `Successfully removed volunteer ${volunteer.name}.` });
+  } catch (error) {
+    console.error('Failed to remove volunteer:', error.message);
+    response.status(500).json({ message: 'Failed to remove volunteer account.' });
+  }
+});
+
 async function ensureManagerLogsTable() {
   try {
     const has = await db.schema.hasTable('manager_logs');
@@ -1899,3 +2052,4 @@ app.post('/api/admin/manager-logs', async (req, res) => {
 app.listen(port, () => {
   console.log(`BDFFI backend listening on port ${port}`);
 });
+   

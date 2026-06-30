@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 
 // ── Mock data ─────────────────────────────────────────────
@@ -143,6 +143,44 @@ function normalizeKey(value) {
 
 function cleanValue(value) {
   return String(value ?? '').trim();
+}
+
+function extractAdmissionPrefix(admission) {
+  if (!admission) return '';
+  const clean = String(admission).trim().toLowerCase();
+
+  // Pattern 1: e.g. 24je0102 -> 24je
+  const match1 = clean.match(/^(\d+[a-z]+)/i);
+  if (match1) return match1[1];
+
+  // Pattern 2: e.g. ISM/2022/001 -> ism/2022
+  const match2 = clean.match(/^([a-z0-9]+[\/_-][a-z0-9]+)/i);
+  if (match2) return match2[1];
+
+  // Default fallback: first 4 characters
+  return clean.slice(0, 4);
+}
+
+function extractBaseProgramme(programme) {
+  if (!programme) return '';
+  const clean = String(programme).trim();
+
+  const match = clean.match(/^(B\.?\s*Tech|B\.?\s*Sc|B\.?\s*A|M\.?\s*Tech|M\.?\s*Sc|M\.?\s*A|MBA|Ph\.?D|B\.?\s*B\.?\s*A)/i);
+  if (match) {
+    let base = match[0].replace(/\s+/g, '');
+    base = base.replace(/b\.?tech/i, 'B.Tech');
+    base = base.replace(/b\.?sc/i, 'B.Sc');
+    base = base.replace(/b\.?a/i, 'B.A.');
+    base = base.replace(/m\.?tech/i, 'M.Tech');
+    base = base.replace(/m\.?sc/i, 'M.Sc');
+    base = base.replace(/m\.?a/i, 'M.A.');
+    base = base.replace(/mba/i, 'MBA');
+    base = base.replace(/ph\.?d/i, 'Ph.D.');
+    base = base.replace(/b\.?b\.?a/i, 'B.B.A.');
+    return base;
+  }
+
+  return clean.split(/[\s\/_]+/)[0];
 }
 
 function normalizeBloodGroup(value) {
@@ -402,6 +440,20 @@ async function readVolunteerAccounts() {
   return response.json();
 }
 
+async function deleteVolunteerAccount(id, actorName, actorEmail) {
+  const response = await fetch(`/api/volunteers/${id}?actorName=${encodeURIComponent(actorName)}&actorEmail=${encodeURIComponent(actorEmail)}`, {
+    method: 'DELETE',
+  });
+
+  const data = await readResponseData(response);
+
+  if (!response.ok) {
+    throw new Error(data.message || 'Failed to remove volunteer account.');
+  }
+
+  return data;
+}
+
 const ACTIVITY = [
   { color: 'red', text: 'New request from AIIMS Delhi — B+ needed urgently', time: '2 min ago' },
   { color: 'green', text: 'Divya Pillai accepted O− donation for Apollo Mumbai', time: '10 min ago' },
@@ -542,11 +594,29 @@ function WhatsAppAlertModal({ open, onClose, donor, initialRequest, requests, wh
   );
 }
 
-function RequestDetailsModal({ open, onClose, request, donors = [], cooldowns = {}, whatsappEvents = [], onOpenOutreachModal }) {
+function RequestDetailsModal({ open, onClose, request, donors = [], cooldowns = {}, whatsappEvents = [], onOpenOutreachModal, blockedFilters = { admissionPrefixes: [], programmes: [] } }) {
   if (!open || !request) return null;
 
   const requestEvents = whatsappEvents.filter(e => Number(e.request_id) === Number(request.id));
-  const eligibleDonors = donors.filter(d => d.blood === request.blood && d.eligible);
+  const eligibleDonors = donors.filter(d => {
+    if (d.blood !== request.blood) return false;
+    if (!d.eligible) return false;
+
+    // Cooldown check (similar to DonorsView table check)
+    const cooldownInfo = isDonorInWhatsAppCooldown(d.mobile, whatsappEvents);
+    const isWSCooldown = cooldownInfo.hasSelectedMonth && cooldownInfo.inCooldown;
+    if (isWSCooldown) return false;
+
+    // Blocked check
+    const prefix = extractAdmissionPrefix(d.admission);
+    const isBlocked = blockedFilters && (
+      (blockedFilters.admissionPrefixes || []).includes(prefix) ||
+      (blockedFilters.programmes || []).includes(extractBaseProgramme(d.programme))
+    );
+    if (isBlocked) return false;
+
+    return true;
+  });
   const acceptedCount = requestEvents.filter(e => e.status === 'accepted').length;
   const declinedCount = requestEvents.filter(e => e.status === 'declined' || e.status === 'failed').length;
   const pendingCount = requestEvents.filter(e => e.status !== 'accepted' && e.status !== 'declined' && e.status !== 'failed').length;
@@ -563,6 +633,22 @@ function RequestDetailsModal({ open, onClose, request, donors = [], cooldowns = 
               <h3 className="rdm-title">Case #{request.caseNumber}</h3>
               <p className="rdm-subtitle">{request.patient} · {request.hospital}</p>
             </div>
+          </div>
+          <div className="rdm-header-actions">
+            {request.requisitionForm ? (
+              <a
+                href={request.requisitionForm.url || '#'}
+                target="_blank"
+                rel="noreferrer"
+                className="rdm-req-link"
+              >
+                📄 View Requisition Form
+              </a>
+            ) : (
+              <span className="rdm-req-unavailable">
+                📄 Requisition form not available
+              </span>
+            )}
           </div>
           <button className="rdm-close-btn" onClick={onClose} title="Close">
             <span>✕</span>
@@ -1036,19 +1122,66 @@ function RequestItem({ request, onOpenDetailsModal }) {
 }
 
 // ── Dashboard View ─────────────────────────────────────────
-function DashboardView({ donors, requests, onSeeAllNotifications, onSeeAllRequests, onOpenDetailsModal, whatsappEvents = [] }) {
+function DashboardView({ donors, requests, onSeeAllNotifications, onSeeAllRequests, onOpenDetailsModal, whatsappEvents = [], volunteerSession, managers = [] }) {
   const eligibleCount = donors.filter(donor => donor.eligible).length;
   const bloodCounts = getBloodCounts(donors);
   const recentBloodNotifications = whatsappEvents.slice(0, 5);
   const recentRequests = requests.slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 5);
 
+  const userManager = managers.find(m => m.gmail.toLowerCase() === volunteerSession?.email?.toLowerCase());
+  const roles = ['Volunteer'];
+  if (userManager) {
+    if (userManager.is_primary) {
+      roles.push('Primary Manager');
+    } else if (userManager.is_active) {
+      roles.push('Manager');
+    }
+  }
+
   return (
     <div className="section-gap">
-      <div className="stats-row">
-        <StatCard value="12" label="Open Requests" icon="🩸" color="red" delta="↑ 3 today" deltaType="warn" />
-        <StatCard value={String(eligibleCount)} label="Eligible Donors" icon="👤" color="green" delta="↑ 8 this week" deltaType="up" />
-        <StatCard value="76%" label="Response Rate" icon="📊" color="blue" delta="↑ 4% vs last wk" deltaType="up" />
-        <StatCard value="28" label="Lives Impacted" icon="❤️" color="amber" delta="↑ 5 this month" deltaType="up" />
+      {/* Current Session Big Long Card */}
+      <div className="manager-hero-glass animate-in" style={{ padding: '1.25rem 1.5rem', display: 'block', width: '100%', boxSizing: 'border-box' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
+            <div style={{
+              width: '50px',
+              height: '50px',
+              borderRadius: '50%',
+              background: '#fff',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              boxShadow: '0 4px 12px rgba(239, 68, 68, 0.2)',
+              overflow: 'hidden',
+              border: '2px solid var(--red)'
+            }}>
+              <img
+                src="https://res.cloudinary.com/dvjschjlg/image/upload/v1722862190/FFI/Logo/gpq3l0srvnvyyjzeg8k5.png"
+                alt="FFI Logo"
+                style={{ width: '80%', height: '80%', objectFit: 'contain' }}
+              />
+            </div>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.15rem' }}>
+              </div>
+              <h3 style={{ margin: 0, fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-1)' }}>{volunteerSession?.name || 'Operator'}</h3>
+              <p style={{ margin: '0.1rem 0 0', fontSize: '0.8rem', color: 'var(--text-3)' }}>{"Current Session : " + (volunteerSession?.email || '')}</p>
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
+            <div style={{ textAlign: 'right' }}>
+              <span style={{ fontSize: '0.68rem', color: 'var(--text-3)', display: 'block', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Assigned Role</span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem', alignItems: 'flex-end', marginTop: '0.15rem' }}>
+                {roles.map(r => (
+                  <span key={r} style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-1)' }}>
+                    {r}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="dashboard-grid">
@@ -1063,8 +1196,8 @@ function DashboardView({ donors, requests, onSeeAllNotifications, onSeeAllReques
                 </div>
                 <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
                   <span className="status-pill active">Live</span>
-                  <button type="button" className="action-btn notify see-all-btn" onClick={onSeeAllRequests} style={{ fontSize: '0.8rem' }}>
-                    See All
+                  <button type="button" className="show-all-btn" onClick={onSeeAllRequests}>
+                    Show All ↗
                   </button>
                 </div>
               </div>
@@ -1093,31 +1226,57 @@ function DashboardView({ donors, requests, onSeeAllNotifications, onSeeAllReques
         </div>
 
         {/* Right column: activity */}
-        <div className="card" style={{ padding: '1.25rem', alignSelf: 'start' }}>
+        <div className="card" style={{ padding: '1.25rem', alignSelf: 'start', display: 'flex', flexDirection: 'column' }}>
           <div className="card-header">
             <div><h3>Live Activity</h3><p>Latest blood donation notifications</p></div>
-            <button type="button" className="action-btn notify see-all-btn" onClick={onSeeAllNotifications}>
-              See All
+            <button type="button" className="show-all-btn" onClick={onSeeAllNotifications}>
+              Show All ↗
             </button>
           </div>
-          <div className="activity-feed">
-            {recentBloodNotifications.map(e => (
-              <div key={e.id} className="activity-item">
-                <div className={`activity-dot ${e.status === 'accepted' ? 'green' : e.status === 'declined' || e.status === 'failed' ? 'red' : 'amber'}`} />
-                <div className="activity-text">
-                  <span>
-                    {e.student_name || 'Donor'} ({formatDisplayPhone(e.student_phone)}){' '}
-                    {e.request_id && requests.find(r => r.id === e.request_id)
-                      ? `[#${requests.find(r => r.id === e.request_id).caseNumber}]`
-                      : ''}
-                  </span>
-                  <span>
-                    {e.response ? `Reply: ${e.response}` : (e.status === 'failed' ? `Failed: ${e.last_error || 'Unknown error'}` : 'Awaiting reply…')}
-                  </span>
-                  <time className="activity-time">{formatISTDateTime(e.created_at)}</time>
+          <div className="activity-feed" style={{ maxHeight: '600px', overflowY: 'auto', paddingRight: '0.25rem' }}>
+            {recentBloodNotifications.map(e => {
+              const caseObj = e.request_id && requests.find(r => r.id === e.request_id);
+              return (
+                <div
+                  key={e.id}
+                  className="activity-item"
+                  onClick={() => caseObj && onOpenDetailsModal(caseObj)}
+                  style={{
+                    cursor: caseObj ? 'pointer' : 'default',
+                    transition: 'background-color 0.2s',
+                    padding: '0.8rem 0.5rem',
+                    borderRadius: '6px',
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '0.75rem',
+                  }}
+                  onMouseEnter={e => {
+                    if (caseObj) e.currentTarget.style.backgroundColor = 'var(--bg-3)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.backgroundColor = '';
+                  }}
+                >
+                  <div className={`activity-dot ${e.status === 'accepted' ? 'green' : e.status === 'declined' || e.status === 'failed' ? 'red' : 'amber'}`} style={{ marginTop: '4px' }} />
+                  <div className="activity-text" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <strong style={{ fontSize: '0.86rem' }}>
+                        {e.student_name || 'Donor'} ({formatDisplayPhone(e.student_phone)}) {caseObj ? `[#${caseObj.caseNumber}]` : ''}
+                      </strong>
+                      {caseObj && (
+                        <span style={{ fontStyle: 'italic', fontSize: '0.82rem', color: 'var(--blue)', fontWeight: 600 }}>
+                          Tap to view case
+                        </span>
+                      )}
+                    </div>
+                    <span style={{ fontSize: '0.82rem', color: 'var(--text-2)', display: 'block' }}>
+                      {e.response ? `Reply: ${e.response}` : (e.status === 'failed' ? `Failed: ${e.last_error || 'Unknown error'}` : 'Awaiting reply…')}
+                    </span>
+                    <time className="activity-time">{formatISTDateTime(e.created_at)}</time>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
@@ -1153,6 +1312,11 @@ function RequestView({ donors = [], onCreateRequest }) {
       time: 'just now',
       donors: Number(form.unitsNeeded) || 0,
       createdAt: new Date().toISOString(),
+      requisitionForm: file ? {
+        name: file.name,
+        url: URL.createObjectURL(file),
+        type: file.type
+      } : null
     });
     setSubmitted(true);
     setForm(emptyForm);
@@ -1451,7 +1615,7 @@ function getEventSender(event) {
 }
 
 // ── Donors View ────────────────────────────────────────────
-function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlertsEnabled, onOpenOutreachModal, cooldowns = {}, setCooldowns, onRecordAction, whatsappEvents = [], managerSession, volunteerSession }) {
+function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlertsEnabled, onOpenOutreachModal, cooldowns = {}, setCooldowns, onRecordAction, whatsappEvents = [], managerSession, volunteerSession, blockedFilters = { admissionPrefixes: [], programmes: [] } }) {
   const [search, setSearch] = useState('');
   const [filterBG, setFilterBG] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
@@ -1484,9 +1648,12 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
         importedAt: new Date().toISOString(),
       };
 
-      await savePersistedSheet(parsedDonors, nextSheetMeta);
+      const store = await savePersistedSheet(parsedDonors, nextSheetMeta);
       setDonors(parsedDonors);
       setSheetMeta(nextSheetMeta);
+      if (store && store.blockedFilters) {
+        setBlockedFilters(store.blockedFilters);
+      }
       setFilterBG('all');
       setFilterStatus('all');
       setShowSheetPreview(false);
@@ -1511,9 +1678,12 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
     const deletedName = sheetMeta.name;
 
     try {
-      await deletePersistedSheet();
+      const store = await deletePersistedSheet();
       setDonors(MOCK_DONORS);
       setSheetMeta(null);
+      if (store && store.blockedFilters) {
+        setBlockedFilters(store.blockedFilters);
+      }
       setSearch('');
       setFilterBG('all');
       setFilterStatus('all');
@@ -1581,7 +1751,7 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
 
     try {
       setAlertMessage({ type: '', text: '' });
-      const sender = managerSession ? { name: managerSession.name, email: managerSession.email } : (volunteerSession ? { name: volunteerSession.name, email: volunteerSession.email } : null);
+      const sender = managerSession ? { name: managerSession.name, email: managerSession.gmail } : (volunteerSession ? { name: volunteerSession.name, email: volunteerSession.email } : null);
       const result = await sendDonorWhatsAppAlert(targetDonor, null, null, null, null, null, sender);
       setDonors(currentDonors => currentDonors.map(donor => (donor.id === donorId ? { ...donor, notified: true } : donor)));
       if (setCooldowns) setCooldowns(current => ({ ...current, [donorId]: 20 }));
@@ -1603,15 +1773,23 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
     const matchSearch = !q || (d.name || '').toLowerCase().includes(q) || (d.admission || '').toLowerCase().includes(q);
     const matchBG = filterBG === 'all' || d.blood === filterBG;
 
+    const prefix = extractAdmissionPrefix(d.admission);
+    const isBlocked = blockedFilters && (
+      (blockedFilters.admissionPrefixes || []).includes(prefix) ||
+      (blockedFilters.programmes || []).includes(extractBaseProgramme(d.programme))
+    );
+
     if (filterStatus === 'all') {
       return matchSearch && matchBG;
     } else if (filterStatus === 'eligible') {
       const cooldownInfo = isDonorInWhatsAppCooldown(d.mobile, whatsappEvents);
       const isWSCooldown = cooldownInfo.hasSelectedMonth && cooldownInfo.inCooldown;
-      return matchSearch && matchBG && d.eligible && !isWSCooldown;
+      return matchSearch && matchBG && d.eligible && !isWSCooldown && !isBlocked;
     } else if (filterStatus === 'cooldown') {
       const cooldownInfo = isDonorInWhatsAppCooldown(d.mobile, whatsappEvents);
-      return matchSearch && matchBG && cooldownInfo.hasSelectedMonth && cooldownInfo.inCooldown;
+      return matchSearch && matchBG && cooldownInfo.hasSelectedMonth && cooldownInfo.inCooldown && !isBlocked;
+    } else if (filterStatus === 'blocked') {
+      return matchSearch && matchBG && isBlocked;
     }
     return false;
   });
@@ -1653,6 +1831,7 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
           <option value="all">All Status</option>
           <option value="eligible">Eligible</option>
           <option value="cooldown">Cooldown</option>
+          <option value="blocked">Blocked</option>
         </select>
       </div>
 
@@ -1688,7 +1867,12 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
             {filtered.map(d => {
               const cooldownInfo = isDonorInWhatsAppCooldown(d.mobile, whatsappEvents);
               const isWSCooldown = cooldownInfo.hasSelectedMonth && cooldownInfo.inCooldown;
-              const isEligible = d.eligible && !isWSCooldown;
+              const prefix = extractAdmissionPrefix(d.admission);
+              const isBlocked = blockedFilters && (
+                (blockedFilters.admissionPrefixes || []).includes(prefix) ||
+                (blockedFilters.programmes || []).includes(extractBaseProgramme(d.programme))
+              );
+              const isEligible = d.eligible && !isWSCooldown && !isBlocked;
               return (
                 <tr key={d.id}>
                   <td>
@@ -1711,7 +1895,19 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
                     )}
                   </td>
                   <td>
-                    {!isEligible ? (
+                    {isBlocked ? (
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                        <span className="eligible-badge blocked-badge">
+                          🚫 Blocked
+                        </span>
+                        <div className="cooldown-info-icon-wrapper">
+                          <span className="cooldown-info-icon">i</span>
+                          <div className="cooldown-info-tooltip">
+                            This programme/admission number is blocked by a manager.
+                          </div>
+                        </div>
+                      </div>
+                    ) : !isEligible ? (
                       <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
                         <span className="eligible-badge no" title={isWSCooldown && cooldownInfo.expiryDate ? `Cooldown expires on ${formatShortDate(cooldownInfo.expiryDate)}` : undefined}>
                           ✗ Cooldown
@@ -1730,7 +1926,11 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
                     )}
                   </td>
                   <td>
-                    {cooldowns[d.id] > 0 ? (
+                    {isBlocked ? (
+                      <button className="action-btn notify" disabled style={{ opacity: 0.6, cursor: 'not-allowed' }}>
+                        Ineligible
+                      </button>
+                    ) : cooldowns[d.id] > 0 ? (
                       <span className="action-btn notified" style={{ opacity: 0.8, cursor: 'not-allowed' }}>
                         ⏳ Notified ({cooldowns[d.id]}s)
                       </span>
@@ -1797,12 +1997,14 @@ function DonorsView({ donors, setDonors, sheetMeta, setSheetMeta, whatsappAlerts
           </div>
         </div>
       )}
+
+
     </div>
   );
 }
 
 // ── Logs View ──────────────────────────────────────────────
-function LogsView({ managerLogs, whatsappEvents = [], onRefresh, requests = [] }) {
+function LogsView({ managerLogs, whatsappEvents = [], onRefresh, requests = [], onOpenDetailsModal }) {
   const iconMap = { sent: '📤', accepted: '✅', declined: '❌', pending: '⏳', failed: '❌' };
   const [logType, setLogType] = useState('blood');
 
@@ -1840,7 +2042,7 @@ function LogsView({ managerLogs, whatsappEvents = [], onRefresh, requests = [] }
               const sender = getEventSender(e) || { name: 'Volunteer', email: 'volunteer@fastforwardindia.org' };
               const caseObj = e.request_id && requests.find(r => r.id === e.request_id);
               const caseNumText = caseObj ? `#${caseObj.caseNumber}` : 'General';
-              
+
               let actionText = '';
               if (e.status === 'accepted') {
                 actionText = `Received outreach confirmation from ${e.student_name || 'Donor'} (${formatDisplayPhone(e.student_phone)})`;
@@ -1851,19 +2053,42 @@ function LogsView({ managerLogs, whatsappEvents = [], onRefresh, requests = [] }
               } else {
                 actionText = `Sent WhatsApp alert to ${e.student_name || 'Donor'} (${formatDisplayPhone(e.student_phone)})`;
               }
-              
+
               return (
-                <div key={e.id} className="log-row">
+                <div
+                  key={e.id}
+                  className="log-row"
+                  onClick={() => caseObj && onOpenDetailsModal?.(caseObj)}
+                  style={{
+                    cursor: caseObj ? 'pointer' : 'default',
+                    transition: 'background-color 0.2s',
+                    padding: '0.75rem 0.5rem',
+                    borderRadius: '6px',
+                  }}
+                  onMouseEnter={e => {
+                    if (caseObj) e.currentTarget.style.backgroundColor = 'var(--bg-3)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.backgroundColor = '';
+                  }}
+                >
                   <div className={`log-icon ${e.status === 'accepted' ? 'accepted' : e.status === 'declined' || e.status === 'failed' ? 'declined' : 'sent'}`}>
                     {iconMap[e.status === 'accepted' ? 'accepted' : e.status === 'declined' || e.status === 'failed' ? 'declined' : 'sent'] || '📲'}
                   </div>
-                  <div className="log-info">
-                    <strong>
-                      Case {caseNumText} — {sender.name} ({sender.email})
-                    </strong>
-                    <span>{actionText}</span>
+                  <div className="log-info" style={{ flex: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                      <strong>
+                        Case {caseNumText} — {sender.name} ({sender.email})
+                      </strong>
+                      <span style={{ fontSize: '0.8rem', color: 'var(--text-2)' }}>{actionText}</span>
+                    </div>
+                    {caseObj && (
+                      <span style={{ fontStyle: 'italic', fontSize: '0.82rem', color: 'var(--blue)', fontWeight: 600, marginLeft: '1rem', whiteSpace: 'nowrap' }}>
+                        Tap to view case
+                      </span>
+                    )}
                   </div>
-                  <span className="log-time">{formatISTDateTime(e.created_at)}</span>
+                  <span className="log-time" style={{ marginLeft: '1rem' }}>{formatISTDateTime(e.created_at)}</span>
                 </div>
               );
             })
@@ -1891,8 +2116,7 @@ function LogsView({ managerLogs, whatsappEvents = [], onRefresh, requests = [] }
   );
 }
 
-function ManagerDashboardView({ managerSession, onLogout, onAddManager, onAddVolunteer, onUpdateSession, onRecordAction, whatsappAlertsEnabled, onToggleWhatsAppAlerts, donors = [], whatsappEvents = [], onOpenWhatsAppAdmin }) {
-  const [managers, setManagers] = useState([]);
+function ManagerDashboardView({ managerSession, onLogout, onAddManager, onAddVolunteer, onUpdateSession, onRecordAction, onRefreshLogs, onSeeAllActivity, whatsappAlertsEnabled, onToggleWhatsAppAlerts, donors = [], volunteers = [], whatsappEvents = [], onOpenWhatsAppAdmin, onManageDonors, onOpenBlockFilters, onOpenVolunteers, managers, setManagers }) {
   const [loading, setLoading] = useState(true);
   const [actionLoadingId, setActionLoadingId] = useState(null);
   const [error, setError] = useState('');
@@ -2068,10 +2292,6 @@ function ManagerDashboardView({ managerSession, onLogout, onAddManager, onAddVol
                 </label>
               </div>
             </div>
-            <button type="button" className="action-btn notify logout-btn" onClick={onLogout}>
-              <span className="logout-arrow">←</span>
-              Logout
-            </button>
           </div>
         </div>
         <div className="manager-hero-session">
@@ -2083,9 +2303,6 @@ function ManagerDashboardView({ managerSession, onLogout, onAddManager, onAddVol
             </div>
           </div>
           <div className="manager-hero-actions">
-            <button type="button" className="hero-action-btn primary" onClick={onAddVolunteer}>
-              ➕ Add Volunteer
-            </button>
             <div className="session-status-badge">
               <div className="status-dot" />
               Session Active
@@ -2102,26 +2319,50 @@ function ManagerDashboardView({ managerSession, onLogout, onAddManager, onAddVol
           <div className="manager-stat-label">Active Managers</div>
           <div className="manager-stat-sub neutral">{managers.length} total</div>
         </div>
+        <div className="manager-stat-card accent-amber stagger-1">
+          <div className="manager-stat-icon">👤</div>
+          <div className="manager-stat-value">{volunteers.length}</div>
+          <div className="manager-stat-label">Active Volunteers</div>
+          <div className="manager-stat-sub neutral">{volunteers.length} total</div>
+          <button
+            type="button"
+            className="manager-stat-action-btn"
+            onClick={onOpenVolunteers}
+          >
+            Manage Volunteers ↗
+          </button>
+        </div>
         <div className="manager-stat-card accent-green stagger-2">
           <div className="manager-stat-icon">🩸</div>
           <div className="manager-stat-value">{totalDonors}</div>
           <div className="manager-stat-label">Registered Donors</div>
           <div className="manager-stat-sub positive">{eligibleDonors} eligible</div>
+          <button
+            type="button"
+            className="manager-stat-action-btn"
+            onClick={onOpenBlockFilters}
+          >
+            Manage Donors ↗
+          </button>
         </div>
         <div
-          className="manager-stat-card accent-blue stagger-3 clickable"
-          onClick={onOpenWhatsAppAdmin}
-          title="Click to open WhatsApp Admin Console"
+          className="manager-stat-card accent-blue stagger-3"
         >
           <div className="manager-stat-icon">📲</div>
           <div className="manager-stat-value">{totalEvents}</div>
           <div className="manager-stat-label" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
             WhatsApp Events
-            <span style={{ fontSize: '0.72rem', opacity: 0.6 }}>↗</span>
           </div>
           <div className={`manager-stat-sub ${failedEvents > 0 ? 'warning' : 'positive'}`}>
             {sentEvents} sent{failedEvents > 0 ? ` · ${failedEvents} failed` : ''}
           </div>
+          <button
+            type="button"
+            className="manager-stat-action-btn"
+            onClick={onOpenWhatsAppAdmin}
+          >
+            Show All ↗
+          </button>
         </div>
       </div>
 
@@ -2143,36 +2384,36 @@ function ManagerDashboardView({ managerSession, onLogout, onAddManager, onAddVol
               </button>
             </div>
 
-            {/* <div className="manager-self-service-note"> */}
-            {/* You can only deactivate your own account. You will be asked to confirm and then logged out immediately. */}
-            {/* </div> */}
-
-            <div className="manager-account-list">
+            <div className="manager-account-list" style={{ maxHeight: '580px', overflowY: 'auto', paddingRight: '0.25rem' }}>
               {activeManagers.map(manager => (
                 <div key={manager.id || manager.gmail} className="manager-account-item">
                   <div>
                     <strong>{manager.name}</strong>
                     <span>{manager.gmail}</span>
                   </div>
-                  <div className="manager-account-actions">
-                    {!manager.is_primary && currentManagerId === Number(manager.id) && (
-                      <button
-                        type="button"
-                        className="manager-deactivate-btn"
-                        disabled={actionLoadingId === manager.id}
-                        onClick={() => handleDeactivate(manager)}
-                      >
-                        {actionLoadingId === manager.id ? '…' : 'Deactivate'}
-                      </button>
-                    )}
-                    {!manager.is_primary && managerSession?.is_primary && currentManagerId !== Number(manager.id) && (
+                  <div className="manager-account-actions" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    {!manager.is_primary && managerSession?.is_primary && (
                       <button
                         type="button"
                         className="manager-deactivate-btn"
                         disabled={actionLoadingId === manager.id}
                         onClick={() => handleDemote(manager)}
+                        style={{
+                          padding: '0.25rem 0.55rem',
+                          fontSize: '0.72rem',
+                          background: 'var(--red-soft)',
+                          color: 'var(--red)',
+                          border: '1px solid rgba(239, 68, 68, 0.2)',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontWeight: 600,
+                          transition: 'all 0.2s',
+                          marginRight: '0.25rem',
+                        }}
+                        onMouseEnter={e => { e.currentTarget.style.backgroundColor = 'var(--red)'; e.currentTarget.style.color = '#fff'; }}
+                        onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'var(--red-soft)'; e.currentTarget.style.color = 'var(--red)'; }}
                       >
-                        {actionLoadingId === manager.id ? '…' : 'Remove'}
+                        {actionLoadingId === manager.id ? '…' : 'Demote'}
                       </button>
                     )}
                     <div className={`manager-account-badge ${manager.is_primary ? 'primary' : ''}`}>
@@ -2189,106 +2430,64 @@ function ManagerDashboardView({ managerSession, onLogout, onAddManager, onAddVol
               )}
             </div>
           </div>
-
-          {/* Deactivated Accounts */}
-          <div className="manager-card card">
-            <div className="card-header">
-              <div>
-                <h3>Deactivated Manager Accounts</h3>
-                <p>{loading ? 'Loading accounts…' : `${deactivatedManagers.length} deactivated account${deactivatedManagers.length === 1 ? '' : 's'}`}</p>
-              </div>
-            </div>
-
-            <div className="manager-account-list">
-              {deactivatedManagers.map(manager => (
-                <div key={manager.id || manager.gmail} className="manager-account-item inactive">
-                  <div>
-                    <strong>{manager.name}</strong>
-                    <span>{manager.gmail}</span>
-                  </div>
-                  <div className="manager-account-actions">
-                    <div className="manager-account-badge inactive">Deactivated</div>
-                  </div>
-                </div>
-              ))}
-              {!loading && deactivatedManagers.length === 0 && (
-                <div className="manager-empty-state">
-                  <span className="manager-empty-state-icon">✨</span>
-                  No deactivated accounts.
-                </div>
-              )}
-            </div>
-          </div>
         </div>
 
         {/* Right Column: Activity + Health */}
         <div className="section-gap">
-          {/* Recent WhatsApp Activity */}
+          {/* Active Volunteers List */}
           <div className="manager-card card">
             <div className="card-header">
               <div>
-                <h3>Recent Activity</h3>
-                <p>Latest WhatsApp outreach events</p>
+                <h3>Active Volunteers</h3>
+                <p>{loading ? 'Loading volunteers…' : `${volunteers.length} volunteer${volunteers.length === 1 ? '' : 's'} registered`}</p>
               </div>
-              <span className="status-pill active">Live</span>
+              <button
+                type="button"
+                className="btn btn-primary manager-card-action"
+                onClick={onAddVolunteer}
+              >
+                ➕ Add Volunteer
+              </button>
             </div>
 
-            <div className="manager-activity-mini">
-              {recentEvents.length > 0 ? recentEvents.map(e => (
-                <div key={e.id} className="manager-activity-item">
-                  <div className={`manager-activity-dot ${e.status === 'accepted' ? 'green' :
-                    e.status === 'declined' || e.status === 'failed' ? 'red' :
-                      e.status === 'sent' || e.status === 'delivered' ? 'blue' : 'amber'
-                    }`} />
-                  <div className="manager-activity-content">
-                    <strong>{e.student_name || 'Donor'} ({formatDisplayPhone(e.student_phone)})</strong>
-                    <span>
-                      {e.response ? `Reply: ${e.response}` :
-                        e.status === 'failed' ? `Failed: ${e.last_error || 'Unknown'}` :
-                          'Awaiting reply…'}
-                    </span>
+            <div className="manager-activity-mini" style={{ maxHeight: '580px', overflowY: 'auto' }}>
+              {volunteers.length > 0 ? volunteers.map(v => {
+                const isManager = managers.some(m => m.gmail.toLowerCase() === v.email.toLowerCase() && (m.is_primary || m.is_active));
+                return (
+                  <div key={v.id || v.email} className="manager-activity-item" style={{ padding: '0.65rem 0.5rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flex: 1 }}>
+                      <div className="manager-activity-dot green" style={{ marginTop: 0 }} />
+                      <div className="manager-activity-content" style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                        <strong style={{ fontSize: '0.88rem' }}>{v.name}</strong>
+                        <span style={{ fontSize: '0.74rem', color: 'var(--text-3)' }}>{v.email}</span>
+                      </div>
+                    </div>
+                    {isManager && (
+                      <span
+                        className="manager-account-badge"
+                        style={{
+                          padding: '0.18rem 0.5rem',
+                          fontSize: '0.68rem',
+                          fontWeight: 600,
+                          background: 'var(--amber-soft)',
+                          color: 'var(--amber)',
+                          borderRadius: '4px',
+                          border: '1px solid rgba(217, 119, 6, 0.2)',
+                          whiteSpace: 'nowrap',
+                          marginRight: '0.25rem',
+                        }}
+                      >
+                        Manager
+                      </span>
+                    )}
                   </div>
-                  <span className="manager-activity-time">{formatISTDateTime(e.created_at)}</span>
-                </div>
-              )) : (
+                );
+              }) : (
                 <div className="manager-empty-state">
-                  <span className="manager-empty-state-icon">📭</span>
-                  No WhatsApp events recorded yet.
+                  <span className="manager-empty-state-icon">👤</span>
+                  No active volunteers found.
                 </div>
               )}
-            </div>
-          </div>
-
-          {/* System Health */}
-          <div className="manager-card card">
-            <div className="card-header">
-              <div>
-                <h3>System Health</h3>
-                <p>Platform and integration status</p>
-              </div>
-            </div>
-
-            <div className="system-health-grid">
-              <div className="health-indicator">
-                <div className={`health-dot ${whatsappAlertsEnabled ? 'healthy' : 'warning'}`} />
-                <span className="health-label">WhatsApp API</span>
-                <span className="health-value">{whatsappAlertsEnabled ? 'Connected' : 'Paused'}</span>
-              </div>
-              <div className="health-indicator">
-                <div className={`health-dot ${totalDonors > 0 ? 'healthy' : 'warning'}`} />
-                <span className="health-label">Donor Pool</span>
-                <span className="health-value">{totalDonors} loaded</span>
-              </div>
-              <div className="health-indicator">
-                <div className={`health-dot ${failedEvents === 0 ? 'healthy' : 'error'}`} />
-                <span className="health-label">Event Failures</span>
-                <span className="health-value">{failedEvents} failed</span>
-              </div>
-              <div className="health-indicator">
-                <div className={`health-dot ${activeManagers.length > 0 ? 'healthy' : 'warning'}`} />
-                <span className="health-label">Access Control</span>
-                <span className="health-value">{activeManagers.length} active</span>
-              </div>
             </div>
           </div>
         </div>
@@ -3139,6 +3338,39 @@ export default function App() {
   });
   const [donors, setDonors] = useState(MOCK_DONORS);
   const [requests, setRequests] = useState(MOCK_REQUESTS);
+  const [blockedFilters, setBlockedFilters] = useState({ admissionPrefixes: [], programmes: [] });
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [volunteers, setVolunteers] = useState([]);
+  const [showVolunteers, setShowVolunteers] = useState(false);
+  const [managers, setManagers] = useState([]);
+
+  const handleUpdateBlockedFilters = async (nextFilters) => {
+    try {
+      const res = await fetch('/api/donors/block-filters', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blockedFilters: nextFilters }),
+      });
+      const data = await res.json();
+      if (data && data.ok) {
+        setBlockedFilters(data.blockedFilters);
+
+        // Log manager action
+        const prefixesStr = nextFilters.admissionPrefixes?.length ? nextFilters.admissionPrefixes.join(', ') : 'None';
+        const progsStr = nextFilters.programmes?.length ? nextFilters.programmes.join(', ') : 'None';
+        await handleRecordManagerAction({
+          request: 'Updated Block Filters',
+          status: 'accepted',
+          msg: `Manager ${managerSession?.name || 'Manager'} updated outreach block filters. Blocked Prefixes: [${prefixesStr}], Blocked Programmes: [${progsStr}].`
+        });
+
+        return true;
+      }
+    } catch (err) {
+      console.error('Failed to save block filters:', err);
+    }
+    return false;
+  };
 
   // Sort requests chronologically (oldest first) to assign sequential case numbers starting from 1
   const sortedChronologically = [...requests].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
@@ -3243,12 +3475,43 @@ export default function App() {
     fetchConfig();
   }, []);
 
+  const loadVolunteers = async () => {
+    try {
+      const list = await readVolunteerAccounts();
+      setVolunteers(Array.isArray(list) ? list : []);
+    } catch (err) {
+      console.warn('Failed to load volunteers:', err);
+    }
+  };
+
+  const loadManagersList = async () => {
+    try {
+      const list = await readManagerAccounts();
+      setManagers(Array.isArray(list) ? list : []);
+    } catch (err) {
+      console.warn('Failed to load managers list:', err);
+    }
+  };
+
   useEffect(() => {
     if (view === 'logs' || view === 'manager' || view === 'dashboard') {
       loadEvents();
       loadManagerLogs();
+      loadManagersList();
+    }
+    if (view === 'manager') {
+      loadVolunteers();
     }
   }, [view]);
+
+  const handleDeleteVolunteer = async (id, name, email) => {
+    const actorName = managerSession?.name || 'Manager';
+    const actorEmail = managerSession?.gmail || 'manager@fastforwardindia.org';
+
+    await deleteVolunteerAccount(id, actorName, actorEmail);
+    setVolunteers(current => current.filter(v => v.id !== id));
+    await loadManagerLogs();
+  };
 
   const [cooldowns, setCooldowns] = useState({});
 
@@ -3284,12 +3547,17 @@ export default function App() {
         const store = await readPersistedSheet();
         if (!active) return;
 
-        if (store && Array.isArray(store.donors) && store.donors.length > 0) {
-          setDonors(store.donors);
-          setSheetMeta(store.sheetMeta || null);
-        } else {
-          setDonors(MOCK_DONORS);
-          setSheetMeta(null);
+        if (store) {
+          if (Array.isArray(store.donors) && store.donors.length > 0) {
+            setDonors(store.donors);
+            setSheetMeta(store.sheetMeta || null);
+          } else {
+            setDonors(MOCK_DONORS);
+            setSheetMeta(null);
+          }
+          if (store.blockedFilters) {
+            setBlockedFilters(store.blockedFilters);
+          }
         }
       } catch (error) {
         if (active) {
@@ -3416,7 +3684,10 @@ export default function App() {
   };
 
   const handleManagerLogout = () => {
-    setManagerSession(null);
+    const confirmed = window.confirm('Are you sure you want to sign out of the Manager Dashboard?');
+    if (confirmed) {
+      setManagerSession(null);
+    }
   };
 
   const handleVolunteerLoginSuccess = nextVolunteerSession => {
@@ -3424,7 +3695,11 @@ export default function App() {
   };
 
   const handleVolunteerLogout = () => {
-    setVolunteerSession(null);
+    const confirmed = window.confirm('Are you sure you want to sign out? You will need to log in again.');
+    if (confirmed) {
+      setVolunteerSession(null);
+      setManagerSession(null);
+    }
   };
 
   const [showWhatsAppAdmin, setShowWhatsAppAdmin] = useState(() => {
@@ -3434,6 +3709,7 @@ export default function App() {
       return params.get('view') === 'whatsapp-admin';
     } catch (e) { return false; }
   });
+  const [showBlockCard, setShowBlockCard] = useState(false);
   const [whStatus, setWhStatus] = useState(null);
   const [whEvents, setWhEvents] = useState([]);
   useEffect(() => {
@@ -3473,12 +3749,30 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app ${mobileMenuOpen ? 'mobile-menu-active' : ''}`}>
       <div className="orb orb-1" />
       <div className="orb orb-2" />
 
+      {/* ── Mobile Top Header ── */}
+      <header className="mobile-header">
+        <button type="button" className="mobile-menu-toggle" onClick={() => setMobileMenuOpen(!mobileMenuOpen)} title="Toggle menu">
+          ☰
+        </button>
+        <div className="mobile-header-title">
+          <strong>Fast Forward India</strong>
+        </div>
+        <div className="mobile-header-avatar">
+          👤
+        </div>
+      </header>
+
+      {/* ── Mobile Sidebar Drawer Backdrop ── */}
+      {mobileMenuOpen && (
+        <div className="mobile-sidebar-backdrop" onClick={() => setMobileMenuOpen(false)} />
+      )}
+
       {/* ── Sidebar ── */}
-      <aside className="sidebar">
+      <aside className={`sidebar ${mobileMenuOpen ? 'open' : ''}`}>
         <div className="sidebar-logo">
           <img className="logo-image" src="https://res.cloudinary.com/dvjschjlg/image/upload/v1722862190/FFI/Logo/gpq3l0srvnvyyjzeg8k5.png" alt="Fast Forward India logo" />
           <div className="logo-text">
@@ -3490,7 +3784,7 @@ export default function App() {
         <span className="sidebar-section-label">Navigation</span>
 
         {navItems.map(n => (
-          <button key={n.key} className={`nav-item ${view === n.key ? 'active' : ''}`} onClick={() => setView(n.key)}>
+          <button key={n.key} className={`nav-item ${view === n.key ? 'active' : ''}`} onClick={() => { setView(n.key); setMobileMenuOpen(false); }}>
             <span className="nav-icon">{n.icon}</span>
             {n.label}
             {n.badge && <span className="nav-badge">{n.badge}</span>}
@@ -3500,24 +3794,23 @@ export default function App() {
         <div className="sidebar-divider" />
         <span className="sidebar-section-label">System</span>
 
-        <button className="nav-item">
+        <button className="nav-item" onClick={() => setMobileMenuOpen(false)}>
           <span className="nav-icon">⚙️</span> Settings
         </button>
-        <button className={`nav-item ${view === 'manager' ? 'active' : ''}`} onClick={() => setView('manager')}>
+        <button className={`nav-item ${view === 'manager' ? 'active' : ''}`} onClick={() => { setView('manager'); setMobileMenuOpen(false); }}>
           <span className="nav-icon">🔒</span> Manager Login
         </button>
 
         <div style={{ marginTop: 'auto', paddingTop: '1rem' }}>
-          <div className="sidebar-footer">
-            <p>🟢 WhatsApp API <strong>Connected</strong><br />Last ping: 12s ago</p>
-          </div>
-          <div className="sidebar-volunteer-info">
-            <span className="volunteer-name">👤 {volunteerSession?.name || 'Volunteer'}</span>
-            <span className="volunteer-email">{volunteerSession?.email || ''}</span>
-            <button type="button" className="volunteer-logout-btn" onClick={handleVolunteerLogout}>
-              ← Sign Out
-            </button>
-          </div>
+          {managerSession && (
+            <div className="sidebar-volunteer-info" style={{ marginBottom: '0.5rem', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '0.5rem' }}>
+              <span className="volunteer-name">🔒 {managerSession.name || 'Manager'}</span>
+              <span className="volunteer-email">{managerSession.gmail || ''}</span>
+              <button type="button" className="volunteer-logout-btn" onClick={() => { handleManagerLogout(); setMobileMenuOpen(false); }}>
+                ← Manager Sign Out
+              </button>
+            </div>
+          )}
         </div>
       </aside>
 
@@ -3535,17 +3828,30 @@ export default function App() {
             <button className="topbar-btn primary" onClick={() => setView('request')}>➕ New Request</button>
             <button className="topbar-btn" onClick={() => setView('donors')}>👥 Donors</button>
             <button className="topbar-btn" onClick={() => { console.log('WhatsApp Admin button clicked'); setShowWhatsAppAdmin(true); }}>📲 WhatsApp Admin</button>
+            <button
+              className="topbar-btn"
+              onClick={handleVolunteerLogout}
+              style={{
+                background: 'var(--red-soft)',
+                color: 'var(--red)',
+                border: '1px solid rgba(239, 68, 68, 0.2)',
+                fontWeight: 600,
+              }}
+              title="Sign out from the entire dashboard"
+            >
+              ← Logout
+            </button>
           </div>
         </header>
 
         <div className={`content-area ${view === 'request' ? 'request-mode' : ''}`}>
-          {view === 'dashboard' && <DashboardView donors={donors} requests={requestsWithCaseNumbers} onSeeAllNotifications={() => setView('logs')} onSeeAllRequests={() => setView('recent')} onOpenDetailsModal={setActiveDetailsRequest} whatsappEvents={whatsappEvents} />}
+          {view === 'dashboard' && <DashboardView donors={donors} requests={requestsWithCaseNumbers} onSeeAllNotifications={() => setView('logs')} onSeeAllRequests={() => setView('recent')} onOpenDetailsModal={setActiveDetailsRequest} whatsappEvents={whatsappEvents} volunteerSession={volunteerSession} managers={managers} />}
           {view === 'request' && <RequestView donors={donors} onCreateRequest={handleCreateRequest} />}
           {view === 'recent' && <RecentRequestsView requests={requestsWithCaseNumbers} onOpenDetailsModal={setActiveDetailsRequest} whatsappEvents={whatsappEvents} />}
-          {view === 'donors' && <DonorsView donors={donors} setDonors={setDonors} sheetMeta={sheetMeta} setSheetMeta={setSheetMeta} whatsappAlertsEnabled={whatsappAlertsEnabled} onOpenOutreachModal={(donor) => { setActiveOutreachDonor(donor); setActiveOutreachRequest(null); }} cooldowns={cooldowns} setCooldowns={setCooldowns} onRecordAction={handleRecordManagerAction} whatsappEvents={whatsappEvents} managerSession={managerSession} volunteerSession={volunteerSession} />}
-          {view === 'logs' && <LogsView managerLogs={managerLogs} whatsappEvents={whatsappEvents} onRefresh={handleRefreshLogs} requests={requestsWithCaseNumbers} />}
+          {view === 'donors' && <DonorsView donors={donors} setDonors={setDonors} sheetMeta={sheetMeta} setSheetMeta={setSheetMeta} whatsappAlertsEnabled={whatsappAlertsEnabled} onOpenOutreachModal={(donor) => { setActiveOutreachDonor(donor); setActiveOutreachRequest(null); }} cooldowns={cooldowns} setCooldowns={setCooldowns} onRecordAction={handleRecordManagerAction} whatsappEvents={whatsappEvents} managerSession={managerSession} volunteerSession={volunteerSession} blockedFilters={blockedFilters} />}
+          {view === 'logs' && <LogsView managerLogs={managerLogs} whatsappEvents={whatsappEvents} onRefresh={handleRefreshLogs} requests={requestsWithCaseNumbers} onOpenDetailsModal={setActiveDetailsRequest} />}
           {view === 'manager' && (managerSession
-            ? <ManagerDashboardView managerSession={managerSession} onLogout={handleManagerLogout} onAddManager={handleOpenAddManager} onAddVolunteer={handleOpenAddVolunteer} onUpdateSession={handleManagerSessionUpdate} onRecordAction={handleRecordManagerAction} whatsappAlertsEnabled={whatsappAlertsEnabled} onToggleWhatsAppAlerts={handleToggleWhatsAppAlerts} donors={donors} whatsappEvents={whatsappEvents} onOpenWhatsAppAdmin={() => setShowWhatsAppAdmin(true)} />
+            ? <ManagerDashboardView managerSession={managerSession} onLogout={handleManagerLogout} onAddManager={handleOpenAddManager} onAddVolunteer={handleOpenAddVolunteer} onUpdateSession={handleManagerSessionUpdate} onRecordAction={handleRecordManagerAction} onRefreshLogs={loadManagerLogs} onSeeAllActivity={() => setView('logs')} whatsappAlertsEnabled={whatsappAlertsEnabled} onToggleWhatsAppAlerts={handleToggleWhatsAppAlerts} donors={donors} volunteers={volunteers} whatsappEvents={whatsappEvents} onOpenWhatsAppAdmin={() => setShowWhatsAppAdmin(true)} onOpenBlockFilters={() => setShowBlockCard(true)} onOpenVolunteers={() => setShowVolunteers(true)} managers={managers} setManagers={setManagers} />
             : <ManagerLoginView managerSession={managerSession} onLoginSuccess={handleManagerLoginSuccess} />
           )}
           {view === 'add-manager' && managerSession && (
@@ -3556,6 +3862,21 @@ export default function App() {
           )}
         </div>
         <WhatsAppAdminPanel open={showWhatsAppAdmin} onClose={() => setShowWhatsAppAdmin(false)} requests={requestsWithCaseNumbers} />
+        <BlockFiltersModal
+          open={showBlockCard}
+          onClose={() => setShowBlockCard(false)}
+          donors={donors}
+          blockedFilters={blockedFilters}
+          onUpdateBlockedFilters={handleUpdateBlockedFilters}
+        />
+        <VolunteersModal
+          open={showVolunteers}
+          onClose={() => setShowVolunteers(false)}
+          volunteers={volunteers}
+          managers={managers}
+          onDeleteVolunteer={handleDeleteVolunteer}
+          managerSession={managerSession}
+        />
         <WhatsAppAlertModal
           open={activeOutreachDonor !== null}
           onClose={() => { setActiveOutreachDonor(null); setActiveOutreachRequest(null); }}
@@ -3564,7 +3885,7 @@ export default function App() {
           requests={requests}
           whatsappStatus={whatsappStatus}
           onSend={async (donor, message, tName, tLang, tParams, reqId) => {
-            const sender = managerSession ? { name: managerSession.name, email: managerSession.email } : (volunteerSession ? { name: volunteerSession.name, email: volunteerSession.email } : null);
+            const sender = managerSession ? { name: managerSession.name, email: managerSession.gmail } : (volunteerSession ? { name: volunteerSession.name, email: volunteerSession.email } : null);
             const result = await sendDonorWhatsAppAlert(donor, message, tName, tLang, tParams, reqId, sender);
             setDonors(currentDonors => currentDonors.map(d => (d.id === donor.id ? { ...d, notified: true } : d)));
             setCooldowns(current => ({ ...current, [donor.id]: 20 }));
@@ -3581,11 +3902,439 @@ export default function App() {
           donors={donors}
           cooldowns={cooldowns}
           whatsappEvents={whatsappEvents}
+          blockedFilters={blockedFilters}
           onOpenOutreachModal={(donor, request) => {
             setActiveOutreachDonor(donor);
             setActiveOutreachRequest(request);
           }}
         />
+      </div>
+    </div>
+  );
+}
+
+// ── Block Filters Modal Component ──────────────────────────
+function BlockFiltersModal({ open, onClose, donors = [], blockedFilters = { admissionPrefixes: [], programmes: [] }, onUpdateBlockedFilters }) {
+  const [savingBlocks, setSavingBlocks] = useState(false);
+  const [tempPrefixes, setTempPrefixes] = useState([]);
+  const [tempProgrammes, setTempProgrammes] = useState([]);
+
+  // Extract unique admission prefixes dynamically from donors
+  const availablePrefixes = useMemo(() => {
+    const prefixes = new Set();
+    donors.forEach(d => {
+      const prefix = extractAdmissionPrefix(d.admission);
+      if (prefix) prefixes.add(prefix);
+    });
+    return Array.from(prefixes).sort();
+  }, [donors]);
+
+  // Extract unique programmes dynamically from donors, grouping by base degree type
+  const availableProgrammes = useMemo(() => {
+    const progs = new Set();
+    donors.forEach(d => {
+      const baseProg = extractBaseProgramme(d.programme);
+      if (baseProg) progs.add(baseProg);
+    });
+    return Array.from(progs).sort();
+  }, [donors]);
+
+  useEffect(() => {
+    if (open && blockedFilters) {
+      setTempPrefixes(blockedFilters.admissionPrefixes || []);
+      setTempProgrammes(blockedFilters.programmes || []);
+    }
+  }, [open, blockedFilters, donors]);
+
+  useEffect(() => {
+    const contentArea = document.querySelector('.content-area');
+    if (contentArea) {
+      if (open) {
+        contentArea.style.overflowY = 'hidden';
+      } else {
+        contentArea.style.overflowY = '';
+      }
+    }
+    return () => {
+      if (contentArea) {
+        contentArea.style.overflowY = '';
+      }
+    };
+  }, [open]);
+
+  if (!open) return null;
+
+  const handleSaveBlocks = async () => {
+    const confirmSave = window.confirm("Are you sure you want to save these block filters? This will update outreach eligibility for all matching student donors.");
+    if (!confirmSave) return;
+
+    setSavingBlocks(true);
+    await onUpdateBlockedFilters({
+      admissionPrefixes: tempPrefixes,
+      programmes: tempProgrammes,
+    });
+    setSavingBlocks(false);
+    onClose();
+  };
+
+  return (
+    <div className="sheet-modal-backdrop" onClick={onClose}>
+      <div className="sheet-modal card block-modal" onClick={e => e.stopPropagation()}>
+        <div className="card-header" style={{ borderBottom: '1px solid var(--border)', paddingBottom: '0.75rem', marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>🚫 Manage Block Filters</h3>
+            <p style={{ margin: '0.25rem 0 0', fontSize: '0.78rem', color: 'var(--text-3)' }}>Excludes matching donors from notifications and outreach campaigns</p>
+          </div>
+          <button
+            type="button"
+            className="modal-close-x"
+            onClick={onClose}
+            style={{ border: 'none', background: 'transparent', fontSize: '1.45rem', color: 'var(--text-3)', cursor: 'pointer', padding: '0.25rem 0.5rem', lineHeight: 1, transition: 'color 0.2s' }}
+            title="Close"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="block-modal-content">
+          <div className="block-section">
+            <h4 style={{ margin: '0 0 0.25rem', fontSize: '0.85rem' }}>Admission Prefix</h4>
+            <p className="block-section-desc">Block matching admission prefixes (e.g. 24je, 24dr, ism/2022)</p>
+            <div className="block-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))' }}>
+              {availablePrefixes.length === 0 ? (
+                <div className="block-empty-msg">No admission prefixes.</div>
+              ) : (
+                availablePrefixes.map(prefix => {
+                  const count = donors.filter(d => extractAdmissionPrefix(d.admission) === prefix).length;
+                  const isChecked = tempPrefixes.includes(prefix);
+                  return (
+                    <label key={prefix} className={`block-checkbox-label ${isChecked ? 'active' : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={e => {
+                          if (e.target.checked) {
+                            setTempPrefixes(current => [...current, prefix]);
+                          } else {
+                            setTempPrefixes(current => current.filter(p => p !== prefix));
+                          }
+                        }}
+                      />
+                      <span className="block-checkbox-text">
+                        <strong>{prefix.toUpperCase()}</strong>
+                        <span className="block-count">{count} {count === 1 ? 'donor' : 'donors'}</span>
+                      </span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          <div className="block-section" style={{ marginTop: '1.5rem' }}>
+            <h4 style={{ margin: '0 0 0.25rem', fontSize: '0.85rem' }}>Programme</h4>
+            <p className="block-section-desc">Block matching academic programmes (e.g. B.Tech, B.Sc, M.Sc)</p>
+            <div className="block-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))' }}>
+              {availableProgrammes.length === 0 ? (
+                <div className="block-empty-msg">No programmes.</div>
+              ) : (
+                availableProgrammes.map(prog => {
+                  const count = donors.filter(d => extractBaseProgramme(d.programme) === prog).length;
+                  const isChecked = tempProgrammes.includes(prog);
+                  return (
+                    <label key={prog} className={`block-checkbox-label ${isChecked ? 'active' : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={e => {
+                          if (e.target.checked) {
+                            setTempProgrammes(current => [...current, prog]);
+                          } else {
+                            setTempProgrammes(current => current.filter(p => p !== prog));
+                          }
+                        }}
+                      />
+                      <span className="block-checkbox-text">
+                        <strong>{prog}</strong>
+                        <span className="block-count">{count} {count === 1 ? 'donor' : 'donors'}</span>
+                      </span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="block-modal-footer" style={{ marginTop: '1.5rem', display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => {
+              setTempPrefixes([]);
+              setTempProgrammes([]);
+            }}
+            disabled={savingBlocks || donors.length === 0}
+          >
+            Clear Selections
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handleSaveBlocks}
+            disabled={savingBlocks || donors.length === 0}
+          >
+            {savingBlocks ? 'Saving…' : 'Save Block Filters'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Volunteers Modal Component ──────────────────────────────
+function VolunteersModal({ open, onClose, volunteers = [], managers = [], onDeleteVolunteer, managerSession }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const contentArea = document.querySelector('.content-area');
+    if (contentArea) {
+      if (open) {
+        contentArea.style.overflowY = 'hidden';
+      } else {
+        contentArea.style.overflowY = '';
+      }
+    }
+    return () => {
+      if (contentArea) {
+        contentArea.style.overflowY = '';
+      }
+    };
+  }, [open]);
+
+  if (!open) return null;
+
+  const handleDelete = async (volunteer) => {
+    const confirmed = window.confirm(`Are you sure you want to remove volunteer "${volunteer.name}" (${volunteer.email})? They will no longer be able to log in, and an email notification will be sent to them.`);
+    if (!confirmed) return;
+
+    setLoading(true);
+    setError('');
+    try {
+      await onDeleteVolunteer(volunteer.id, volunteer.name, volunteer.email);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to remove volunteer account.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div
+      className="sheet-modal-backdrop"
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(15, 23, 42, 0.45)',
+        backdropFilter: 'blur(8px)',
+        WebkitBackdropFilter: 'blur(8px)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '2rem',
+        zIndex: 9999,
+      }}
+    >
+      <div
+        className="sheet-modal card block-modal"
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: '100%',
+          maxWidth: '520px',
+          borderRadius: '12px',
+          boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)',
+          border: '1px solid var(--border)',
+          backgroundColor: '#fff',
+          padding: '1.5rem',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        <div
+          className="card-header"
+          style={{
+            borderBottom: '1px solid var(--border)',
+            paddingBottom: '1rem',
+            marginBottom: '1rem',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
+          <div>
+            <h3 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-1)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              👥 Manage Volunteers
+            </h3>
+            <p style={{ margin: '0.25rem 0 0', fontSize: '0.82rem', color: 'var(--text-3)' }}>
+              Remove existing volunteer accounts and send email notifications.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="modal-close-x"
+            onClick={onClose}
+            style={{
+              border: 'none',
+              background: 'transparent',
+              fontSize: '1.5rem',
+              color: 'var(--text-3)',
+              cursor: 'pointer',
+              padding: '0.5rem',
+              lineHeight: 1,
+              borderRadius: '50%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transition: 'all 0.2s',
+            }}
+            title="Close"
+            onMouseEnter={e => {
+              e.currentTarget.style.backgroundColor = 'var(--bg-3)';
+              e.currentTarget.style.color = 'var(--text-1)';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.backgroundColor = 'transparent';
+              e.currentTarget.style.color = 'var(--text-3)';
+            }}
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Warning Alert Banner */}
+        <div
+          style={{
+            background: 'var(--amber-soft)',
+            color: 'var(--amber)',
+            border: '1px solid rgba(217, 119, 6, 0.2)',
+            padding: '0.75rem 1rem',
+            borderRadius: '8px',
+            fontSize: '0.82rem',
+            fontWeight: 500,
+            marginBottom: '1.25rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+          }}
+        >
+          <span>⚠️</span>
+          <span>A manager can only remove a volunteer that is not a manager.</span>
+        </div>
+
+        {error && <div className="manager-error" style={{ marginBottom: '1rem' }}>{error}</div>}
+
+        <div className="block-modal-content" style={{ maxHeight: '350px', overflowY: 'auto', paddingRight: '0.25rem' }}>
+          <div className="manager-account-list" style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+            {volunteers.map(v => {
+              const isManager = managers.some(m => m.gmail.toLowerCase() === v.email.toLowerCase() && (m.is_primary || m.is_active));
+              return (
+                <div
+                  key={v.id || v.email}
+                  className="manager-account-item"
+                  style={{
+                    padding: '0.75rem 0.75rem',
+                    borderBottom: '1px solid var(--border)',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    borderRadius: '8px',
+                    transition: 'background-color 0.2s',
+                  }}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.backgroundColor = 'var(--bg-3)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                  }}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                    <strong style={{ fontSize: '0.9rem', color: 'var(--text-1)' }}>{v.name}</strong>
+                    <span style={{ fontSize: '0.78rem', color: 'var(--text-3)' }}>{v.email}</span>
+                  </div>
+                  {isManager ? (
+                    <span
+                      style={{
+                        padding: '0.3rem 0.75rem',
+                        fontSize: '0.76rem',
+                        fontWeight: 600,
+                        background: 'var(--amber-soft)',
+                        color: 'var(--amber)',
+                        borderRadius: '6px',
+                        border: '1px solid rgba(217, 119, 6, 0.2)',
+                        whiteSpace: 'nowrap',
+                        cursor: 'not-allowed',
+                      }}
+                      title="super admin (primary manager) needs to demote a manager first before removing as volunteer."
+                    >
+                      Manager
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="manager-deactivate-btn"
+                      onClick={() => handleDelete(v)}
+                      disabled={loading}
+                      style={{
+                        padding: '0.35rem 0.85rem',
+                        fontSize: '0.8rem',
+                        fontWeight: 600,
+                        borderRadius: '6px',
+                        background: 'var(--red-soft)',
+                        color: 'var(--red)',
+                        border: '1px solid rgba(239, 68, 68, 0.2)',
+                        opacity: loading ? 0.7 : 1,
+                        cursor: 'pointer',
+                        transition: 'all 0.2s',
+                      }}
+                      onMouseEnter={e => {
+                        if (!loading) {
+                          e.currentTarget.style.backgroundColor = 'var(--red)';
+                          e.currentTarget.style.color = '#fff';
+                        }
+                      }}
+                      onMouseLeave={e => {
+                        if (!loading) {
+                          e.currentTarget.style.backgroundColor = 'var(--red-soft)';
+                          e.currentTarget.style.color = 'var(--red)';
+                        }
+                      }}
+                    >
+                      {loading ? '…' : 'Remove'}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+            {volunteers.length === 0 && (
+              <div className="manager-empty-state" style={{ padding: '2rem 0', textAlign: 'center', color: 'var(--text-3)' }}>
+                <span className="manager-empty-state-icon" style={{ fontSize: '1.8rem', display: 'block', marginBottom: '0.5rem' }}>👤</span>
+                No volunteer accounts found.
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="block-modal-footer" style={{ borderTop: '1px solid var(--border)', paddingTop: '0.75rem', marginTop: '1rem', display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            className="action-btn notify"
+            onClick={onClose}
+            style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}
+          >
+            Close
+          </button>
+        </div>
       </div>
     </div>
   );

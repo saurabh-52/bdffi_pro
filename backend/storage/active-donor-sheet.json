@@ -257,5 +257,11 @@
       "eligible": true,
       "notified": true
     }
-  ]
+  ],
+  "blockedFilters": {
+    "admissionPrefixes": [
+      "26ad"
+    ],
+    "programmes": []
+  }
 }
