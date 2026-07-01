@@ -1,28 +1,80 @@
 # 🩸 Fast Forward India - Blood Donation Automation System
 
-## 📖 Overview
-This project is an automated blood donation requisition and matching system built for **Fast Forward India (NGO)**. It streamlines the process of finding blood donors by extracting patient details from medical forms using AI, matching them with eligible student donors from a database, and automating outreach via WhatsApp.
+An automated, real-time blood donation matching and outreach portal built for **Fast Forward India (NGO), IIT (ISM) Dhanbad**. This platform streamlines blood drive coordination by matching patient requirements with eligible student donors from local databases, sending templates via WhatsApp, tracking responses, and providing comprehensive auditing for managers.
+
+---
+
+## ✨ Features
+
+### 💻 Component-Based UI
+The frontend has been modularized from a single monolithic file into a clean component-based React architecture:
+- **`src/utils/`**: Centralized utilities for helpers (dates/times formatting, normalizers, cooldown checkers), global constants, and api wrappers.
+- **`src/components/`**: Clean reusable widgets, modal overlays, portal controllers, and views.
+
+### 📋 Volunteer & Operator Dashboard
+- **Operator Dashboard**: View live outreach activity feed and blood pool stats.
+- **Intake Form**: Form to input case details manually or upload medical requisitions.
+- **Recent Requests**: Historical and live listings of blood cases matched with status pills (Pending, Active, Fulfilled).
+
+### 👥 Donor & Roster Management
+- **Roster Controls**: Search student donors by name or roll number, and filter by blood group.
+- **Excel Sync**: Seamlessly import new excel roster sheets or export the current filtered database back to XLSX.
+- **Outreach Cooldowns**: Enforces a strict 3-month eligibility cooldown to prevent donor fatigue.
+- **Block Filters**: Exclude entire cohorts dynamically from outreach campaigns using admission roll prefixes (e.g., `24je`) or academic programmes (e.g., `B.Tech`).
+
+### 📲 WhatsApp Outreach & Admin Console
+- **Direct Outreach**: Send template outreach messages to eligible matching donors.
+- **Admin Console**: Real-time webhook monitor showing sent messages, deliveries, replies, and error logs.
+- **Error Recovery**: Manual button trigger to retry failed alerts or resend updates.
+
+### 🔒 Access Control & Auditing
+- **Multi-Tier Portals**: Separate dashboards for general Volunteers and primary Managers.
+- **Manager Tools**: Super-admins can promote volunteers, deactivate accounts, and demote managers.
+- **Manager Audit Log**: Independent tracking of administrative operations (roster imports/deletions, setting updates) for auditing.
+
+---
 
 ## 🛠 Tech Stack
-* **Frontend:** React.js
-* **Backend:** Node.js, Express.js
-* **Database:** MySQL
-* **AI Integration:** OpenAI GPT-4o Vision API (or Google Cloud Vision) for OCR
-* **Messaging:** Meta WhatsApp Cloud API (or Twilio)
 
+- **Frontend**: React 18, Vite, Vanilla CSS
+- **Backend**: Node.js, Express.js
+- **Database**: MySQL, Knex.js
+- **Integrations**: Meta WhatsApp Cloud API, xlsx (SheetJS)
+
+---
+
+## 📂 Project Structure
+
+```text
+bdffi/
+├── backend/                  # Node.js + Express backend service
+│   ├── index.js              # Server entry point and API routes
+│   └── ...
+├── frontend/                 # React + Vite frontend application
+│   ├── src/
+│   │   ├── components/       # Component-based UI layout
+│   │   │   ├── modals/       # Popups (WhatsAppAdmin, BlockFilters, AlertModal, etc.)
+│   │   │   ├── views/        # Tab pages (Dashboard, Donors, Logs, Login portals)
+│   │   │   ├── BloodBadge.jsx
+│   │   │   ├── RequestItem.jsx
+│   │   │   └── ...
+│   │   ├── utils/            # Helper files
+│   │   │   ├── api.js        # Backend API wrappers
+│   │   │   ├── constants.js  # Global lists and mock databases
+│   │   │   └── helpers.js    # Data normalizers and dates formats
+│   │   ├── App.jsx           # App state container and shell
+│   │   ├── main.jsx
+│   │   └── styles.css        # Vanilla CSS styling rules
+│   └── package.json
+└── README.md
+```
+
+---
 
 ## ⚙️ Installation & Setup
 
-Follow these steps to set up both the backend and frontend services locally.
-
-### 1. Clone the repository
-```bash
-git clone https://github.com/yourusername/ffi-blood-donation.git
-cd ffi-blood-donation
-```
-
-### 2. Set Up the Backend
-1. Navigate to the backend directory and install dependencies:
+### 1. Set Up the Backend
+1. Install backend dependencies:
    ```bash
    cd backend
    npm install
@@ -46,36 +98,33 @@ cd ffi-blood-donation
    META_WHATSAPP_API_VERSION=v25.0
    META_WHATSAPP_VERIFY_TOKEN=bdffi_meta_webhook_verify_token
    META_WHATSAPP_TEMPLATE_NAME=blood_donation_request_
-   META_WHATSAPP_TEMPLATE_LANGUAGE=en  # Use 'en' or 'en_US' depending on template locale in Meta Manager
+   META_WHATSAPP_TEMPLATE_LANGUAGE=en
    ```
 
-### 3. Initialize the Database
+### 2. Initialize the Database
 Run migrations and seed the database using Knex:
 ```bash
-# Create database (if not exists)
+# Create database
 mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS bdffi;"
 
-# Run schema migrations
+# Run schema migrations and seeds
 npx knex --knexfile knexfile.js migrate:latest
-
-# Populate database with seeds
 npx knex --knexfile knexfile.js seed:run
 ```
 > [!NOTE]
 > The database migration seeds a default manager account:
-> - **Email:** `manager@fastforwardindia.org`
-> - **Password:** (Set in `SUPER_MANAGER_PASSWORD` or defaults to `FFI-Manager-1234`)
+> - **Email**: `manager@fastforwardindia.org`
+> - **Password**: Set in `SUPER_MANAGER_PASSWORD` or defaults to `FFI-Manager-1234`.
 
-### 4. Start the Services
-* **Backend Dev Server** (Runs on port `3001`):
+### 3. Run Locally
+- **Backend Service** (Runs on port `3001`):
   ```bash
   cd backend
   npm run dev
   ```
-* **Frontend Dev Server** (Runs on port `5173` via Vite):
+- **Frontend Service** (Runs on port `5173` via Vite):
   ```bash
-  cd ../frontend
-  npm install
+  cd frontend
   npm run dev
   ```
 
@@ -83,12 +132,10 @@ npx knex --knexfile knexfile.js seed:run
 
 ## 📲 Meta WhatsApp Business API Integration
 
-### 1. Template Creation in Meta WhatsApp Manager
+### 1. Template Setup
 Create a template matching the following details in your WhatsApp Business account:
-- **Template Name:** `blood_donation_request_`
-- **Category:** Utility or Marketing (depending on your setup)
-- **Language:** English (`en`) or English (US) (`en_US`)
-- **Body Content:**
+- **Template Name**: `blood_donation_request_`
+- **Body Content**:
   ```text
   Hello {{1}}, 
 
@@ -102,32 +149,20 @@ Create a template matching the following details in your WhatsApp Business accou
   Fast Forward India
   Official student NGO, IIT Dhanbad
   ```
-- **Variables Mapping:**
+- **Variables Mapping**:
   - `{{1}}`: Donor's name
   - `{{2}}`: Required blood group
   - `{{3}}`: Patient's name
   - `{{4}}`: Hospital name / Location
-- **Interactive Buttons:** Add a quick reply button labeled `YES` (and optionally `NO`).
+- **Interactive Buttons**: Add a quick reply button labeled `YES` (and optionally `NO`).
 
-> [!WARNING]
-> Meta is strict on translation locales. If your template is created with language "English" (code `en`) but you request `en_US` in the API, it will fail with `(#132001) Template name does not exist in the translation`. Make sure `META_WHATSAPP_TEMPLATE_LANGUAGE` in your `.env` matches the code configured in the Meta Manager exactly.
-
-### 2. Local Webhook Testing (ngrok Setup)
-Meta requires a secure public URL to deliver incoming message events. You can use `ngrok` to expose your local port `3001`:
-
-1. Expose backend port `3001`:
+### 2. Callback URL Integration
+WhatsApp incoming events (like yes/no responses) require a public webhook endpoint:
+1. Expose backend port `3001` using ngrok:
    ```bash
-   .\ngrok config add-authtoken AUTH_TOKEN
-   .\ngrok http 3001
+   ngrok http 3001
    ```
-2. Copy the generated HTTPS forwarding URL (e.g. `https://xxxx.ngrok-free.app`).
-3. In the Meta Developer Console, go to **WhatsApp > Configuration**:
-   - **Callback URL:** `https://xxxx.ngrok-free.app/api/meta/whatsapp/webhook`
-   - **Verify Token:** Use the string set in `META_WHATSAPP_VERIFY_TOKEN` (e.g. `bdffi_meta_webhook_verify_token`).
-   - Click **Verify and Save**.
-4. **Subscribe to Webhook Fields:** Under the Webhooks section, click **Manage** next to webhook fields and **Subscribe** to **`messages`** (this is crucial for receiving yes/no replies from donors).
-
----
-
-## 🤝 Contributing
-Contributions are welcome! Please open an issue or submit a pull request if you have suggestions to improve the system.
+2. Copy the secure public HTTPS forwarding URL and verify it in the Meta Developer Console under **WhatsApp > Configuration**:
+   - **Callback URL**: `https://<forwarding-subdomain>.ngrok-free.app/api/meta/whatsapp/webhook`
+   - **Verify Token**: Match the token in your `.env` (e.g. `bdffi_meta_webhook_verify_token`).
+3. Subscribe to the `messages` fields under **Webhooks**.
