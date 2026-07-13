@@ -6,11 +6,6 @@ An automated, real-time blood donation matching and outreach portal built for **
 
 ## ✨ Features
 
-### 💻 Component-Based UI
-The frontend has been modularized from a single monolithic file into a clean component-based React architecture:
-- **`src/utils/`**: Centralized utilities for helpers (dates/times formatting, normalizers, cooldown checkers), global constants, and api wrappers.
-- **`src/components/`**: Clean reusable widgets, modal overlays, portal controllers, and views.
-
 ### 📋 Volunteer & Operator Dashboard
 - **Operator Dashboard**: View live outreach activity feed and blood pool stats.
 - **Intake Form**: Form to input case details manually or upload medical requisitions.
@@ -48,8 +43,14 @@ The frontend has been modularized from a single monolithic file into a clean com
 ```text
 bdffi/
 ├── backend/                  # Node.js + Express backend service
-│   ├── index.js              # Server entry point and API routes
-│   └── ...
+│   ├── config/               # System configurations (WhatsApp credentials loader)
+│   ├── controllers/          # Business logic endpoint handlers (Donors, Webhooks, Users)
+│   ├── db/                   # Knex SQL initialization and automatic schema check hooks
+│   ├── models/               # File store backups and cohort filtering algorithms
+│   ├── routes/               # Express routing branch maps
+│   ├── utils/                # Messaging wrappers (WhatsApp API, Nodemailer mail client)
+│   ├── index.js              # Main Express startup entry point
+│   └── knexfile.js           # SQL connectivity settings
 ├── frontend/                 # React + Vite frontend application
 │   ├── src/
 │   │   ├── components/       # Component-based UI layout
